@@ -55,15 +55,22 @@ def get_status_history(equipment_id):
 #------------------------------------------------------
 # 4. 데이터 관리 (CRUD)
 #------------------------------------------------------
-def upload_image(uploaded_file):
-    try:
-        file_extension = uploaded_file.name.split('.')[-1]
-        file_name = f"{uuid.uuid4()}.{file_extension}"
-        supabase.storage.from_('equipment_images').upload(file_name, uploaded_file.getvalue(), {'content-type': uploaded_file.type})
-        return supabase.storage.from_('equipment_images').get_public_url(file_name)
-    except Exception as e:
-        st.error(f"이미지 업로드 실패: {e}")
+# 변경: 여러 이미지를 업로드하는 함수로 수정
+def upload_images(uploaded_files):
+    if not uploaded_files:
         return None
+    
+    image_urls = []
+    for uploaded_file in uploaded_files:
+        try:
+            file_extension = uploaded_file.name.split('.')[-1]
+            file_name = f"{uuid.uuid4()}.{file_extension}"
+            supabase.storage.from_('equipment_images').upload(file_name, uploaded_file.getvalue(), {'content-type': uploaded_file.type})
+            public_url = supabase.storage.from_('equipment_images').get_public_url(file_name)
+            image_urls.append(public_url)
+        except Exception as e:
+            st.error(f"이미지 업로드 실패: {e}")
+    return ",".join(image_urls) if image_urls else None # URL 리스트를 쉼표로 구분된 문자열로 반환
 
 def add_factory(name, password):
     supabase.from_('factories').insert({'name': name, 'password': password}).execute()
@@ -80,14 +87,15 @@ def delete_factory(factory_id):
     st.success("공장 삭제 완료")
     st.cache_data.clear()
 
-def add_equipment(factory_id, name, maker, model, details, image_url=None):
+# 변경: 이미지 URL을 문자열로 받도록 수정
+def add_equipment(factory_id, name, maker, model, details, image_urls=None):
     supabase.from_('equipment').insert({
         'factory_id': factory_id,
         'name': name,
         'maker': maker,
         'model': model,
         'details': details,
-        'image_url': image_url,
+        'image_url': image_urls, # 쉼표로 구분된 문자열
         'status': '정상'
     }).execute()
     st.success(f"'{name}' 설비 추가 완료")
@@ -220,8 +228,11 @@ else:
                 with st.expander(f"[{eq['status']}] {eq['name']} ({eq['maker']}/{eq['model']})", expanded=False):
                     col1, col2 = st.columns([1, 2])
                     with col1:
+                        # 변경: 이미지 URL 문자열을 분리하여 여러 이미지 표시
                         if eq.get('image_url'):
-                            st.image(eq['image_url'], width='stretch')
+                            image_urls = eq['image_url'].split(',')
+                            for url in image_urls:
+                                st.image(url.strip(), width='stretch')
                         else:
                             st.warning("이미지 없음")
                         
@@ -256,10 +267,11 @@ else:
             maker = st.text_input("제조사")
             model = st.text_input("모델")
             details = st.text_area("세부 사항")
-            uploaded_image = st.file_uploader("설비 이미지", type=['png', 'jpg', 'jpeg'])
+            # 변경: 여러 파일 업로드를 허용
+            uploaded_images = st.file_uploader("설비 이미지 (여러 개 선택 가능)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
             if st.form_submit_button("설비 추가", use_container_width=True):
-                image_url = upload_image(uploaded_image) if uploaded_image else None
-                add_equipment(factory_id, name, maker, model, details, image_url)
+                image_urls = upload_images(uploaded_images) # 변경된 함수 호출
+                add_equipment(factory_id, name, maker, model, details, image_urls)
                 st.rerun()
 
     # ------------------------ 정비 이력 추가 ------------------------
