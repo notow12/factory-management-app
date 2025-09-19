@@ -72,13 +72,10 @@ def upload_images(uploaded_files):
             return None
     return ",".join(image_urls) if image_urls else None
 
-# 변경: 이미지 URL 업데이트 함수 추가
 def update_equipment_images(equipment_id, uploaded_files):
-    # 기존 이미지 URL 가져오기
     current_eq_data = supabase.from_('equipment').select('image_url').eq('id', equipment_id).single().execute().data
     old_urls = current_eq_data['image_url'].split(',') if current_eq_data and current_eq_data['image_url'] else []
     
-    # 기존 이미지 삭제 (파일 이름만 추출하여)
     for url in old_urls:
         try:
             file_name = url.split('/')[-1]
@@ -86,9 +83,7 @@ def update_equipment_images(equipment_id, uploaded_files):
         except Exception as e:
             st.warning(f"기존 이미지 삭제 실패: {e}")
     
-    # 새 이미지 업로드 및 URL 반환
     return upload_images(uploaded_files)
-
 
 def add_factory(name, password):
     supabase.from_('factories').insert({'name': name, 'password': password}).execute()
@@ -118,9 +113,7 @@ def add_equipment(factory_id, name, maker, model, details, image_urls=None):
     st.success(f"'{name}' 설비 추가 완료")
     st.cache_data.clear()
 
-# 변경: 이미지 업데이트 로직 추가
 def update_equipment(equipment_id, name, maker, model, details, status, uploaded_images):
-    # 이미지 파일이 업로드된 경우에만 이미지 업데이트 함수 호출
     if uploaded_images:
         new_image_urls = update_equipment_images(equipment_id, uploaded_images)
         supabase.from_('equipment').update({
@@ -144,7 +137,6 @@ def update_equipment(equipment_id, name, maker, model, details, status, uploaded
     st.cache_data.clear()
 
 def delete_equipment(equipment_id):
-    # 삭제 전에 이미지 파일도 삭제
     current_eq_data = supabase.from_('equipment').select('image_url').eq('id', equipment_id).single().execute().data
     old_urls = current_eq_data['image_url'].split(',') if current_eq_data and current_eq_data['image_url'] else []
     for url in old_urls:
@@ -205,15 +197,14 @@ if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
 if 'current_factory' not in st.session_state:
     st.session_state['current_factory'] = None
-# 변경: 선택된 설비와 이력 상태를 저장하는 세션 변수 추가
 if 'selected_eq_id_admin' not in st.session_state:
     st.session_state['selected_eq_id_admin'] = None
 if 'selected_log_id_admin' not in st.session_state:
     st.session_state['selected_log_id_admin'] = None
-
+if 'selected_factory_id_admin' not in st.session_state:
+    st.session_state['selected_factory_id_admin'] = None
 
 def set_selected_equipment():
-    # 세션 상태에 선택된 설비 ID 저장
     if 'selected_equipment_name_admin_selectbox' in st.session_state:
         equipment_list_admin = get_equipment()
         eq_data = next((eq for eq in equipment_list_admin if eq['name'] == st.session_state.selected_equipment_name_admin_selectbox), None)
@@ -223,10 +214,17 @@ def set_selected_equipment():
             st.session_state.selected_eq_id_admin = None
 
 def set_selected_log():
-    # 세션 상태에 선택된 이력 ID 저장
     if 'selected_log_id_admin_selectbox' in st.session_state:
         st.session_state.selected_log_id_admin = st.session_state.selected_log_id_admin_selectbox
 
+def set_selected_factory():
+    if 'selected_factory_name_admin_selectbox' in st.session_state:
+        factories_list_admin = get_factories()
+        factory_data = next((f for f in factories_list_admin if f['name'] == st.session_state.selected_factory_name_admin_selectbox), None)
+        if factory_data:
+            st.session_state.selected_factory_id_admin = factory_data['id']
+        else:
+            st.session_state.selected_factory_id_admin = None
 
 # 로그인 화면
 if not st.session_state['authenticated']:
@@ -256,7 +254,6 @@ if not st.session_state['authenticated']:
 else:
     # 로그인 성공 후 메인 화면
     
-    # 상단 메뉴
     st.markdown("<style>.menu-btn {margin-right: 10px;}</style>", unsafe_allow_html=True)
     st.markdown(
         f"""
@@ -375,7 +372,6 @@ else:
             if not equipment_df.empty:
                 equipment_df['factory_name'] = equipment_df['factories'].apply(lambda x: x['name'])
                 
-                # 변경: 설비 선택 시 초기화되는 버그 수정
                 eq_options = ['설비를 선택하세요'] + list(equipment_df['name'])
                 st.selectbox(
                     "설비 선택", 
@@ -394,8 +390,16 @@ else:
                             updated_model = st.text_input("모델명", value=selected_eq['model'])
                             updated_details = st.text_area("세부 사항", value=selected_eq['details'])
                             updated_status = st.selectbox("상태", ['정상', '고장'], index=0 if selected_eq['status'] == '정상' else 1)
-                            # 변경: 이미지 수정 기능 추가
-                            uploaded_images = st.file_uploader("이미지 수정 (새 이미지 업로드)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key='update_image_uploader')
+                            
+                            st.markdown("##### 현재 이미지")
+                            if selected_eq.get('image_url'):
+                                image_urls = selected_eq['image_url'].split(',')
+                                for url in image_urls:
+                                    st.image(url.strip(), width='stretch')
+                            else:
+                                st.info("등록된 이미지가 없습니다.")
+                            
+                            uploaded_images = st.file_uploader("이미지 수정 (새 이미지 업로드 시 기존 이미지는 교체됩니다.)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key='update_image_uploader')
                             
                             col1, col2 = st.columns(2)
                             with col1:
@@ -409,6 +413,8 @@ else:
             else:
                 st.info("등록된 설비가 없습니다.")
 
+            st.markdown("---")
+
             # ------------------------ 정비 이력 관리 ------------------------
             st.subheader("정비 이력 관리")
             logs_df = pd.DataFrame(get_maintenance_logs())
@@ -417,7 +423,6 @@ else:
                 logs_df['factory_name'] = logs_df['equipment'].apply(lambda x: x['factories']['name'])
                 st.dataframe(logs_df[['id', 'equipment_name', 'factory_name', 'maintenance_date', 'engineer', 'action', 'notes']])
                 
-                # 변경: 이력 선택 시 초기화되는 버그 수정
                 st.selectbox(
                     "이력 선택",
                     logs_df['id'],
@@ -446,6 +451,8 @@ else:
             else:
                 st.info("등록된 정비 이력이 없습니다.")
 
+            st.markdown("---")
+
             # ------------------------ 공장 관리 ------------------------
             st.subheader("공장 관리")
             factories_df = pd.DataFrame(get_factories())
@@ -462,21 +469,30 @@ else:
                 
                 st.markdown("---")
                 st.markdown("##### 공장 수정/삭제")
-                selected_factory_name = st.selectbox("수정/삭제할 공장 선택", factories_df['name'])
-                selected_factory = factories_df[factories_df['name'] == selected_factory_name].iloc[0]
                 
-                with st.form("update_factory_form"):
-                    updated_name = st.text_input("이름", value=selected_factory['name'])
-                    updated_password = st.text_input("비밀번호", value=selected_factory['password'], type="password")
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.form_submit_button("수정"):
-                            update_factory(selected_factory['id'], updated_name, updated_password)
-                            st.rerun()
-                    with col2:
-                        if st.form_submit_button("삭제"):
-                            delete_factory(selected_factory['id'])
-                            st.rerun()
+                factory_options = ['공장을 선택하세요'] + list(factories_df['name'])
+                st.selectbox(
+                    "수정/삭제할 공장 선택",
+                    factory_options,
+                    key='selected_factory_name_admin_selectbox',
+                    on_change=set_selected_factory
+                )
+                
+                if st.session_state.selected_factory_id_admin:
+                    selected_factory = factories_df[factories_df['id'] == st.session_state.selected_factory_id_admin].iloc[0]
+
+                    with st.form("update_factory_form"):
+                        updated_name = st.text_input("이름", value=selected_factory['name'])
+                        updated_password = st.text_input("비밀번호", value=selected_factory['password'], type="password")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if st.form_submit_button("수정"):
+                                update_factory(selected_factory['id'], updated_name, updated_password)
+                                st.rerun()
+                        with col2:
+                            if st.form_submit_button("삭제"):
+                                delete_factory(selected_factory['id'])
+                                st.rerun()
         elif admin_password_input:
             st.error("관리자 비밀번호가 올바르지 않습니다.")
