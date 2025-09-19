@@ -55,7 +55,6 @@ def get_status_history(equipment_id):
 #------------------------------------------------------
 # 4. 데이터 관리 (CRUD)
 #------------------------------------------------------
-# 변경: 여러 이미지를 업로드하는 함수로 수정
 def upload_images(uploaded_files):
     if not uploaded_files:
         return None
@@ -70,7 +69,26 @@ def upload_images(uploaded_files):
             image_urls.append(public_url)
         except Exception as e:
             st.error(f"이미지 업로드 실패: {e}")
-    return ",".join(image_urls) if image_urls else None # URL 리스트를 쉼표로 구분된 문자열로 반환
+            return None
+    return ",".join(image_urls) if image_urls else None
+
+# 변경: 이미지 URL 업데이트 함수 추가
+def update_equipment_images(equipment_id, uploaded_files):
+    # 기존 이미지 URL 가져오기
+    current_eq_data = supabase.from_('equipment').select('image_url').eq('id', equipment_id).single().execute().data
+    old_urls = current_eq_data['image_url'].split(',') if current_eq_data and current_eq_data['image_url'] else []
+    
+    # 기존 이미지 삭제 (파일 이름만 추출하여)
+    for url in old_urls:
+        try:
+            file_name = url.split('/')[-1]
+            supabase.storage.from_('equipment_images').remove([file_name])
+        except Exception as e:
+            st.warning(f"기존 이미지 삭제 실패: {e}")
+    
+    # 새 이미지 업로드 및 URL 반환
+    return upload_images(uploaded_files)
+
 
 def add_factory(name, password):
     supabase.from_('factories').insert({'name': name, 'password': password}).execute()
@@ -87,7 +105,6 @@ def delete_factory(factory_id):
     st.success("공장 삭제 완료")
     st.cache_data.clear()
 
-# 변경: 이미지 URL을 문자열로 받도록 수정
 def add_equipment(factory_id, name, maker, model, details, image_urls=None):
     supabase.from_('equipment').insert({
         'factory_id': factory_id,
@@ -95,18 +112,48 @@ def add_equipment(factory_id, name, maker, model, details, image_urls=None):
         'maker': maker,
         'model': model,
         'details': details,
-        'image_url': image_urls, # 쉼표로 구분된 문자열
+        'image_url': image_urls,
         'status': '정상'
     }).execute()
     st.success(f"'{name}' 설비 추가 완료")
     st.cache_data.clear()
 
-def update_equipment(equipment_id, name, maker, model, details, status):
-    supabase.from_('equipment').update({'name': name, 'maker': maker, 'model': model, 'details': details, 'status': status}).eq('id', equipment_id).execute()
+# 변경: 이미지 업데이트 로직 추가
+def update_equipment(equipment_id, name, maker, model, details, status, uploaded_images):
+    # 이미지 파일이 업로드된 경우에만 이미지 업데이트 함수 호출
+    if uploaded_images:
+        new_image_urls = update_equipment_images(equipment_id, uploaded_images)
+        supabase.from_('equipment').update({
+            'name': name,
+            'maker': maker,
+            'model': model,
+            'details': details,
+            'status': status,
+            'image_url': new_image_urls
+        }).eq('id', equipment_id).execute()
+    else:
+        supabase.from_('equipment').update({
+            'name': name,
+            'maker': maker,
+            'model': model,
+            'details': details,
+            'status': status
+        }).eq('id', equipment_id).execute()
+        
     st.success("설비 정보가 업데이트 되었습니다.")
     st.cache_data.clear()
 
 def delete_equipment(equipment_id):
+    # 삭제 전에 이미지 파일도 삭제
+    current_eq_data = supabase.from_('equipment').select('image_url').eq('id', equipment_id).single().execute().data
+    old_urls = current_eq_data['image_url'].split(',') if current_eq_data and current_eq_data['image_url'] else []
+    for url in old_urls:
+        try:
+            file_name = url.split('/')[-1]
+            supabase.storage.from_('equipment_images').remove([file_name])
+        except Exception as e:
+            st.warning(f"이미지 삭제 실패: {e}")
+
     supabase.from_('equipment').delete().eq('id', equipment_id).execute()
     supabase.from_('maintenance_logs').delete().eq('equipment_id', equipment_id).execute()
     supabase.from_('equipment_status_history').delete().eq('equipment_id', equipment_id).execute()
@@ -158,8 +205,28 @@ if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
 if 'current_factory' not in st.session_state:
     st.session_state['current_factory'] = None
-if 'active_tab' not in st.session_state:
-    st.session_state['active_tab'] = '대시보드'
+# 변경: 선택된 설비와 이력 상태를 저장하는 세션 변수 추가
+if 'selected_eq_id_admin' not in st.session_state:
+    st.session_state['selected_eq_id_admin'] = None
+if 'selected_log_id_admin' not in st.session_state:
+    st.session_state['selected_log_id_admin'] = None
+
+
+def set_selected_equipment():
+    # 세션 상태에 선택된 설비 ID 저장
+    if 'selected_equipment_name_admin_selectbox' in st.session_state:
+        equipment_list_admin = get_equipment()
+        eq_data = next((eq for eq in equipment_list_admin if eq['name'] == st.session_state.selected_equipment_name_admin_selectbox), None)
+        if eq_data:
+            st.session_state.selected_eq_id_admin = eq_data['id']
+        else:
+            st.session_state.selected_eq_id_admin = None
+
+def set_selected_log():
+    # 세션 상태에 선택된 이력 ID 저장
+    if 'selected_log_id_admin_selectbox' in st.session_state:
+        st.session_state.selected_log_id_admin = st.session_state.selected_log_id_admin_selectbox
+
 
 # 로그인 화면
 if not st.session_state['authenticated']:
@@ -228,7 +295,6 @@ else:
                 with st.expander(f"[{eq['status']}] {eq['name']} ({eq['maker']}/{eq['model']})", expanded=False):
                     col1, col2 = st.columns([1, 2])
                     with col1:
-                        # 변경: 이미지 URL 문자열을 분리하여 여러 이미지 표시
                         if eq.get('image_url'):
                             image_urls = eq['image_url'].split(',')
                             for url in image_urls:
@@ -267,10 +333,9 @@ else:
             maker = st.text_input("제조사")
             model = st.text_input("모델")
             details = st.text_area("세부 사항")
-            # 변경: 여러 파일 업로드를 허용
             uploaded_images = st.file_uploader("설비 이미지 (여러 개 선택 가능)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
             if st.form_submit_button("설비 추가", use_container_width=True):
-                image_urls = upload_images(uploaded_images) # 변경된 함수 호출
+                image_urls = upload_images(uploaded_images)
                 add_equipment(factory_id, name, maker, model, details, image_urls)
                 st.rerun()
 
@@ -309,28 +374,38 @@ else:
             equipment_df = pd.DataFrame(get_equipment())
             if not equipment_df.empty:
                 equipment_df['factory_name'] = equipment_df['factories'].apply(lambda x: x['name'])
-                st.dataframe(equipment_df[['id', 'name', 'maker', 'model', 'factory_name', 'details', 'status']])
-            
-                with st.expander("설비 수정/삭제"):
-                    selected_eq_name = st.selectbox("설비 선택", equipment_df['name'])
-                    selected_eq = equipment_df[equipment_df['name'] == selected_eq_name].iloc[0]
+                
+                # 변경: 설비 선택 시 초기화되는 버그 수정
+                eq_options = ['설비를 선택하세요'] + list(equipment_df['name'])
+                st.selectbox(
+                    "설비 선택", 
+                    eq_options, 
+                    key='selected_equipment_name_admin_selectbox',
+                    on_change=set_selected_equipment
+                )
+                
+                if st.session_state.selected_eq_id_admin:
+                    selected_eq = equipment_df[equipment_df['id'] == st.session_state.selected_eq_id_admin].iloc[0]
                     
-                    with st.form("update_equipment_form"):
-                        updated_name = st.text_input("설비명", value=selected_eq['name'])
-                        updated_maker = st.text_input("제조사", value=selected_eq['maker'])
-                        updated_model = st.text_input("모델명", value=selected_eq['model'])
-                        updated_details = st.text_area("세부 사항", value=selected_eq['details'])
-                        updated_status = st.selectbox("상태", ['정상', '고장'], index=0 if selected_eq['status'] == '정상' else 1)
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            if st.form_submit_button("수정"):
-                                update_equipment(selected_eq['id'], updated_name, updated_maker, updated_model, updated_details, updated_status)
-                                st.rerun()
-                        with col2:
-                            if st.form_submit_button("삭제"):
-                                delete_equipment(selected_eq['id'])
-                                st.rerun()
+                    with st.expander("설비 수정/삭제", expanded=True):
+                        with st.form("update_equipment_form"):
+                            updated_name = st.text_input("설비명", value=selected_eq['name'])
+                            updated_maker = st.text_input("제조사", value=selected_eq['maker'])
+                            updated_model = st.text_input("모델명", value=selected_eq['model'])
+                            updated_details = st.text_area("세부 사항", value=selected_eq['details'])
+                            updated_status = st.selectbox("상태", ['정상', '고장'], index=0 if selected_eq['status'] == '정상' else 1)
+                            # 변경: 이미지 수정 기능 추가
+                            uploaded_images = st.file_uploader("이미지 수정 (새 이미지 업로드)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key='update_image_uploader')
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.form_submit_button("수정"):
+                                    update_equipment(selected_eq['id'], updated_name, updated_maker, updated_model, updated_details, updated_status, uploaded_images)
+                                    st.rerun()
+                            with col2:
+                                if st.form_submit_button("삭제"):
+                                    delete_equipment(selected_eq['id'])
+                                    st.rerun()
             else:
                 st.info("등록된 설비가 없습니다.")
 
@@ -342,24 +417,32 @@ else:
                 logs_df['factory_name'] = logs_df['equipment'].apply(lambda x: x['factories']['name'])
                 st.dataframe(logs_df[['id', 'equipment_name', 'factory_name', 'maintenance_date', 'engineer', 'action', 'notes']])
                 
-                with st.expander("정비 이력 수정/삭제"):
-                    selected_log_id = st.selectbox("이력 선택", logs_df['id'])
-                    selected_log = logs_df[logs_df['id'] == selected_log_id].iloc[0]
-                    
-                    with st.form("update_log_form"):
-                        updated_engineer = st.text_input("정비자", value=selected_log['engineer'])
-                        updated_action = st.text_area("작업 내용", value=selected_log['action'])
-                        updated_notes = st.text_area("비고", value=selected_log['notes'])
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            if st.form_submit_button("수정"):
-                                update_log(selected_log_id, updated_engineer, updated_action, updated_notes)
-                                st.rerun()
-                        with col2:
-                            if st.form_submit_button("삭제"):
-                                delete_log(selected_log_id)
-                                st.rerun()
+                # 변경: 이력 선택 시 초기화되는 버그 수정
+                st.selectbox(
+                    "이력 선택",
+                    logs_df['id'],
+                    key='selected_log_id_admin_selectbox',
+                    on_change=set_selected_log
+                )
+
+                if st.session_state.selected_log_id_admin:
+                    selected_log = logs_df[logs_df['id'] == st.session_state.selected_log_id_admin].iloc[0]
+
+                    with st.expander("정비 이력 수정/삭제", expanded=True):
+                        with st.form("update_log_form"):
+                            updated_engineer = st.text_input("정비자", value=selected_log['engineer'])
+                            updated_action = st.text_area("작업 내용", value=selected_log['action'])
+                            updated_notes = st.text_area("비고", value=selected_log['notes'])
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.form_submit_button("수정"):
+                                    update_log(selected_log['id'], updated_engineer, updated_action, updated_notes)
+                                    st.rerun()
+                            with col2:
+                                if st.form_submit_button("삭제"):
+                                    delete_log(selected_log['id'])
+                                    st.rerun()
             else:
                 st.info("등록된 정비 이력이 없습니다.")
 
