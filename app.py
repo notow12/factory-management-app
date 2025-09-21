@@ -4,8 +4,7 @@ from dotenv import load_dotenv
 import os
 import pandas as pd
 import uuid
-from datetime import datetime
-import pytz
+from datetime import datetime, date, time
 
 #------------------------------------------------------
 # 1. 환경 변수 로드
@@ -170,11 +169,11 @@ def delete_equipment(equipment_id):
     st.session_state.selected_eq_id_admin = None
     st.cache_data.clear()
 
-def add_log(equipment_id, engineer, action, notes, image_urls=None):
-    now_kst = datetime.now(pytz.timezone('Asia/Seoul')).isoformat()
+def add_log(equipment_id, engineer, action, notes, maintenance_date, maintenance_time, image_urls=None):
+    combined_dt = datetime.combine(maintenance_date, maintenance_time)
     supabase.from_('maintenance_logs').insert({
         'equipment_id': equipment_id,
-        'maintenance_date': now_kst,
+        'maintenance_date': combined_dt.isoformat(),
         'engineer': engineer,
         'action': action,
         'notes': notes,
@@ -216,13 +215,13 @@ def delete_log(log_id):
     st.success("정비 이력 삭제 완료")
     st.cache_data.clear()
 
-def add_status_history(equipment_id, status, notes):
-    now_kst = datetime.now(pytz.timezone('Asia/Seoul')).isoformat()
+def add_status_history(equipment_id, status, notes, history_date, history_time):
+    combined_dt = datetime.combine(history_date, history_time)
     supabase.from_('equipment_status_history').insert({
         'equipment_id': equipment_id,
         'status': status,
         'notes': notes,
-        'created_at': now_kst
+        'created_at': combined_dt.isoformat()
     }).execute()
     supabase.from_('equipment').update({'status': status}).eq('id', equipment_id).execute()
     st.success(f"상태 '{status}' 기록 완료")
@@ -373,18 +372,24 @@ else:
                         
                         st.subheader("상태 기록")
                         with st.form(f"status_form_{eq['id']}", clear_on_submit=True):
+                            history_date = st.date_input("기록 날짜", value=date.today())
+                            history_time = st.time_input("기록 시간", value=time(datetime.now().hour, datetime.now().minute))
                             new_status = st.radio("상태 변경", ['🟢 정상', '🔴 고장'], index=0 if eq['status'] == '정상' else 1)
                             notes = st.text_area("변경 사유")
                             if st.form_submit_button("기록"):
                                 final_status = new_status.split(' ')[1]
-                                add_status_history(eq['id'], final_status, notes)
+                                add_status_history(eq['id'], final_status, notes, history_date, history_time)
                                 st.rerun()
 
                     with col2:
                         st.subheader("세부 사항")
                         st.markdown(f"**제조사:** {eq['maker']}")
                         st.markdown(f"**모델:** {eq['model']}")
-                        st.markdown(f"**세부 내용:** {eq['details']}")
+                        
+                        # 다중 줄 표시를 위해 \n을 <br> 태그로 변환
+                        details_html = eq['details'].replace('\n', '<br>')
+                        st.markdown(f"**세부 내용:** {details_html}", unsafe_allow_html=True)
+                        
                         st.markdown(f"**현재 상태:** <span style='color:{status_color}; font-weight:bold;'>{eq['status']}</span>", unsafe_allow_html=True)
                         
                         st.subheader("최근 정비 이력 (최대 5개)")
@@ -430,6 +435,8 @@ else:
             selected_equipment_name = st.selectbox("정비할 설비 선택", list(equipment_options.keys()))
             
             with st.form("add_log_form", clear_on_submit=True):
+                maintenance_date = st.date_input("정비 날짜", value=date.today())
+                maintenance_time = st.time_input("정비 시간", value=time(datetime.now().hour, datetime.now().minute))
                 engineer = st.text_input("정비자 이름")
                 action = st.text_area("작업 내용")
                 notes = st.text_area("비고 (선택 사항)")
@@ -438,7 +445,7 @@ else:
                     if engineer and action:
                         selected_equipment_id = equipment_options[selected_equipment_name]
                         image_urls = upload_images(uploaded_images)
-                        add_log(selected_equipment_id, engineer, action, notes, image_urls)
+                        add_log(selected_equipment_id, engineer, action, notes, maintenance_date, maintenance_time, image_urls)
                         st.rerun()
                     else:
                         st.error("정비자 이름과 작업 내용을 입력해 주세요.")
@@ -477,8 +484,13 @@ else:
                         st.markdown("##### 상세 내용")
                         st.markdown(f"**날짜:** {pd.to_datetime(selected_log['maintenance_date']).strftime('%Y-%m-%d %H:%M')}")
                         st.markdown(f"**엔지니어:** {selected_log['engineer']}")
-                        st.markdown(f"**작업 내용:** {selected_log['action']}")
-                        st.markdown(f"**비고:** {selected_log['notes']}")
+                        
+                        # 다중 줄 표시를 위해 \n을 <br> 태그로 변환
+                        action_html = selected_log['action'].replace('\n', '<br>')
+                        notes_html = selected_log['notes'].replace('\n', '<br>')
+                        st.markdown(f"**작업 내용:** {action_html}", unsafe_allow_html=True)
+                        st.markdown(f"**비고:** {notes_html}", unsafe_allow_html=True)
+
 
     # ------------------------ 상태 기록 ------------------------
     with tabs[4]:
