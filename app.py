@@ -5,6 +5,7 @@ import os
 import pandas as pd
 import uuid
 from datetime import datetime
+import pytz
 
 #------------------------------------------------------
 # 1. 환경 변수 로드
@@ -166,12 +167,14 @@ def delete_equipment(equipment_id):
     supabase.from_('maintenance_logs').delete().eq('equipment_id', equipment_id).execute()
     supabase.from_('equipment_status_history').delete().eq('equipment_id', equipment_id).execute()
     st.success("설비 및 관련 데이터 삭제 완료")
+    st.session_state.selected_eq_id_admin = None
     st.cache_data.clear()
 
 def add_log(equipment_id, engineer, action, notes, image_urls=None):
+    now_kst = datetime.now(pytz.timezone('Asia/Seoul')).isoformat()
     supabase.from_('maintenance_logs').insert({
         'equipment_id': equipment_id,
-        'maintenance_date': datetime.now().isoformat(),
+        'maintenance_date': now_kst,
         'engineer': engineer,
         'action': action,
         'notes': notes,
@@ -214,11 +217,12 @@ def delete_log(log_id):
     st.cache_data.clear()
 
 def add_status_history(equipment_id, status, notes):
+    now_kst = datetime.now(pytz.timezone('Asia/Seoul')).isoformat()
     supabase.from_('equipment_status_history').insert({
         'equipment_id': equipment_id,
         'status': status,
         'notes': notes,
-        'created_at': datetime.now().isoformat()
+        'created_at': now_kst
     }).execute()
     supabase.from_('equipment').update({'status': status}).eq('id', equipment_id).execute()
     st.success(f"상태 '{status}' 기록 완료")
@@ -446,34 +450,35 @@ else:
         if not logs:
             st.info("등록된 정비 이력이 없습니다.")
         else:
-            log_options = {f"[{log['equipment']['factories']['name']}] {log['equipment']['name']} - {log['maintenance_date'].split('T')[0]}": log['id'] for log in logs if log.get('equipment') and log['equipment'].get('factories')}
+            log_options = {f"[{log['equipment']['factories']['name']}] {log['equipment']['name']} - {pd.to_datetime(log['maintenance_date']).strftime('%Y-%m-%d %H:%M')} ({log['notes']})": log['id'] for log in logs if log.get('equipment') and log['equipment'].get('factories')}
             log_options_list = list(log_options.keys())
             
-            selected_log_name = st.selectbox("정비 이력 선택", log_options_list, key='selected_log_name_view_selectbox', on_change=set_selected_log)
-            st.session_state.selected_log_id = log_options[selected_log_name]
+            selected_log_name = st.selectbox("정비 이력 선택", ['선택하세요'] + log_options_list, key='selected_log_name_view_selectbox')
             
-            selected_log = next((log for log in logs if log['id'] == st.session_state.selected_log_id), None)
+            if selected_log_name != '선택하세요':
+                st.session_state.selected_log_id = log_options[selected_log_name]
+                selected_log = next((log for log in logs if log['id'] == st.session_state.selected_log_id), None)
             
-            if selected_log:
-                st.markdown("---")
-                st.subheader(f"{selected_log['equipment']['name']} 정비 이력")
-                
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    st.markdown("##### 정비 사진")
-                    if selected_log.get('image_urls'):
-                        image_urls = selected_log['image_urls'].split(',')
-                        for url in image_urls:
-                            st.image(url.strip(), width='stretch')
-                    else:
-                        st.warning("등록된 사진이 없습니다.")
-                
-                with col2:
-                    st.markdown("##### 상세 내용")
-                    st.markdown(f"**날짜:** {selected_log['maintenance_date'].split('T')[0]}")
-                    st.markdown(f"**엔지니어:** {selected_log['engineer']}")
-                    st.markdown(f"**작업 내용:** {selected_log['action']}")
-                    st.markdown(f"**비고:** {selected_log['notes']}")
+                if selected_log:
+                    st.markdown("---")
+                    st.subheader(f"{selected_log['equipment']['name']} 정비 이력")
+                    
+                    col1, col2 = st.columns([1, 2])
+                    with col1:
+                        st.markdown("##### 정비 사진")
+                        if selected_log.get('image_urls'):
+                            image_urls = selected_log['image_urls'].split(',')
+                            for url in image_urls:
+                                st.image(url.strip(), width='stretch')
+                        else:
+                            st.warning("등록된 사진이 없습니다.")
+                    
+                    with col2:
+                        st.markdown("##### 상세 내용")
+                        st.markdown(f"**날짜:** {pd.to_datetime(selected_log['maintenance_date']).strftime('%Y-%m-%d %H:%M')}")
+                        st.markdown(f"**엔지니어:** {selected_log['engineer']}")
+                        st.markdown(f"**작업 내용:** {selected_log['action']}")
+                        st.markdown(f"**비고:** {selected_log['notes']}")
 
     # ------------------------ 상태 기록 ------------------------
     with tabs[4]:
@@ -507,18 +512,28 @@ else:
             
             # ------------------------ 설비 관리 ------------------------
             st.subheader("설비 관리")
-            equipment_df = pd.DataFrame(get_equipment())
-            if not equipment_df.empty:
+            equipment_list = get_equipment()
+            if not equipment_list:
+                st.info("등록된 설비가 없습니다.")
+                st.session_state.selected_eq_id_admin = None
+            else:
+                equipment_df = pd.DataFrame(equipment_list)
                 equipment_df['factory_name'] = equipment_df['factories'].apply(lambda x: x.get('name', 'N/A'))
                 
                 eq_options = ['설비를 선택하세요'] + list(equipment_df['name'])
-                st.selectbox(
+                
+                selected_eq_name = st.selectbox(
                     "설비 선택", 
                     eq_options, 
-                    key='selected_equipment_name_admin_selectbox',
-                    on_change=set_selected_equipment
+                    key='selected_equipment_name_admin_selectbox'
                 )
                 
+                selected_eq_data = next((eq for eq in equipment_list if eq['name'] == selected_eq_name), None)
+                if selected_eq_data:
+                    st.session_state.selected_eq_id_admin = selected_eq_data['id']
+                else:
+                    st.session_state.selected_eq_id_admin = None
+                    
                 if st.session_state.selected_eq_id_admin:
                     selected_eq = equipment_df[equipment_df['id'] == st.session_state.selected_eq_id_admin].iloc[0]
                     
@@ -549,8 +564,9 @@ else:
                                 if st.form_submit_button("삭제"):
                                     delete_equipment(selected_eq['id'])
                                     st.rerun()
-            else:
-                st.info("등록된 설비가 없습니다.")
+                else:
+                    st.info("선택된 설비가 없거나 삭제되었습니다.")
+
 
             st.markdown("---")
 
@@ -619,7 +635,6 @@ else:
                 
                 st.dataframe(status_history_df[['id', 'factory_name', 'equipment_name', 'created_at', 'status', 'notes']])
 
-                # 수정: selectbox에 표시할 사용자 친화적인 레이블 생성
                 status_history_df['display_name'] = status_history_df.apply(
                     lambda row: f"[{row['factory_name']}] {row['equipment_name']} - {row['created_at']} ({row['notes']})",
                     axis=1
