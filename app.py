@@ -25,6 +25,28 @@ def init_connection():
 
 supabase: Client = init_connection()
 
+# 필드 정의 (특화 필드만 - 공통 필드는 제외)
+FIELD_DEFINITIONS = {
+    # 사출기 전용
+    'min_mold_thickness': {'label': '최소금형두께', 'type': 'text'},
+    'max_mold_thickness': {'label': '최대금형두께', 'type': 'text'},
+    'tie_bar_spacing': {'label': '타이바간격', 'type': 'text'},
+    'plate_thickness': {'label': '플레이트두께', 'type': 'text'},
+    'oil_flow_rate': {'label': '오일유량', 'type': 'text'},
+    'max_displacement': {'label': '최대변위', 'type': 'text'},
+    
+    # CNC 전용
+    'spindle_speed': {'label': '스핀들 속도', 'type': 'text'},
+    'table_size': {'label': '테이블 크기', 'type': 'text'},
+    'axis_travel': {'label': '축 이동거리', 'type': 'text'},
+    'tool_capacity': {'label': '공구 용량', 'type': 'text'},
+    
+    # 프레스 전용
+    'press_capacity': {'label': '프레스 용량', 'type': 'text'},
+    'stroke_length': {'label': '스트로크 길이', 'type': 'text'},
+    'bed_size': {'label': '베드 크기', 'type': 'text'},
+}
+
 # ------------------------------------------------------
 # 세션 상태 초기화
 # ------------------------------------------------------
@@ -177,16 +199,14 @@ def serialize_data_for_json(data):
     else:
         return data
 
-def add_equipment(factory_id, name, model, details_dict, accessory_specs, spare_part_specs, documents, screw_specs, oil_specs, image_urls=None):
+def add_equipment(factory_id, name, model, equipment_type, details_dict, accessory_specs, spare_part_specs, documents, screw_specs, oil_specs, image_urls=None):
     try:
         for part in spare_part_specs:
             if isinstance(part.get('교체 일자'), date):
                 part['교체 일자'] = part['교체 일자'].isoformat()
-
         for key, value in details_dict.items():
             if isinstance(value, date):
                 details_dict[key] = value.isoformat() if value else None
-
         # screw_specs 처리
         if not isinstance(screw_specs, dict):
             screw_specs = {}
@@ -197,13 +217,33 @@ def add_equipment(factory_id, name, model, details_dict, accessory_specs, spare_
             if 'wear_resistant_cycle_df' in screw_specs and isinstance(screw_specs['wear_resistant_cycle_df'], pd.DataFrame):
                 screw_specs['wear_resistant_cycle'] = screw_specs['wear_resistant_cycle_df'].to_dict('records')
                 del screw_specs['wear_resistant_cycle_df']
-
+        
+        # equipment 테이블에 실제 컬럼으로 존재하는 필드들
+        direct_columns = [
+            'product_name', 'maker', 'serial_number', 'production_date',
+            'acquisition_cost', 'acquisition_date', 'acquisition_basis',
+            'purchase_date', 'installation_location', 'motor_capacity',
+            'heater_capacity', 'total_weight', 'other_notes'
+        ]
+        
+        # details_dict를 direct 필드와 extra 필드로 분리
+        direct_fields = {}
+        extra_fields = {}
+        
+        for key, value in details_dict.items():
+            if key in direct_columns:
+                direct_fields[key] = value
+            else:
+                extra_fields[key] = value
+        
         data = {
             "factory_id": factory_id,
             "name": name,
             "model": model,
+            "equipment_type": equipment_type,
             "status": '정상',
-            **details_dict,
+            **direct_fields,  # 실제 컬럼에 저장
+            "details": json.dumps(extra_fields, ensure_ascii=False),  # 특화 필드는 JSON으로 저장
             "accessory_specs": json.dumps(accessory_specs, ensure_ascii=False),
             "spare_part_specs": json.dumps(spare_part_specs, ensure_ascii=False),
             "documents": json.dumps(documents, ensure_ascii=False),
@@ -211,7 +251,6 @@ def add_equipment(factory_id, name, model, details_dict, accessory_specs, spare_
             "oil_specs": json.dumps(oil_specs, ensure_ascii=False),
             "image_urls": image_urls
         }
-
         supabase.from_('equipment').insert(data).execute()
         st.success("설비가 성공적으로 추가되었습니다.")
         st.cache_data.clear()
@@ -222,19 +261,13 @@ def add_equipment(factory_id, name, model, details_dict, accessory_specs, spare_
 
 def update_equipment(equipment_id, name, product_name, maker, model, details_dict, accessory_specs, spare_part_specs, documents, screw_specs, oil_specs, status, uploaded_images, oil_notes='', oil_aftercare=''):
     try:
-        new_image_urls = None
-        if uploaded_images:
-            new_image_urls = update_equipment_images(equipment_id, uploaded_images)
-
         for part in spare_part_specs:
             if isinstance(part.get('교체 일자'), date):
                 part['교체 일자'] = part['교체 일자'].isoformat()
-
         for key, value in details_dict.items():
             if isinstance(value, date):
                 details_dict[key] = value.isoformat() if value else None
-
-        # screw_specs 처리
+        
         if not isinstance(screw_specs, dict):
             screw_specs = {}
         else:
@@ -244,32 +277,54 @@ def update_equipment(equipment_id, name, product_name, maker, model, details_dic
             if 'wear_resistant_cycle_df' in screw_specs and isinstance(screw_specs['wear_resistant_cycle_df'], pd.DataFrame):
                 screw_specs['wear_resistant_cycle'] = screw_specs['wear_resistant_cycle_df'].to_dict('records')
                 del screw_specs['wear_resistant_cycle_df']
-
-        data = {
+        
+        # equipment 테이블 실제 컬럼
+        direct_columns = [
+            'product_name', 'maker', 'serial_number', 'production_date',
+            'acquisition_cost', 'acquisition_date', 'acquisition_basis',
+            'purchase_date', 'installation_location', 'motor_capacity',
+            'heater_capacity', 'total_weight', 'other_notes'
+        ]
+        
+        # details_dict를 direct 필드와 extra 필드로 분리
+        direct_fields = {}
+        extra_fields = {}
+        
+        for key, value in details_dict.items():
+            if key in direct_columns:
+                direct_fields[key] = value
+            else:
+                extra_fields[key] = value
+        
+        oil_specs_with_notes = oil_specs + [{'notes': oil_notes}, {'aftercare': oil_aftercare}]
+        
+        if uploaded_images:
+            new_image_urls = upload_images(uploaded_images)
+            existing_image_urls = supabase.table('equipment').select('image_urls').eq('id', equipment_id).execute().data[0].get('image_urls', '')
+            combined_image_urls = f"{existing_image_urls},{new_image_urls}" if existing_image_urls else new_image_urls
+        else:
+            combined_image_urls = supabase.table('equipment').select('image_urls').eq('id', equipment_id).execute().data[0].get('image_urls', '')
+        
+        update_data = {
             "name": name,
-            "product_name": product_name,
-            "maker": maker,
             "model": model,
-            "status": '정상' if status == get_translation('normal') else '고장',
-            **details_dict,
+            "equipment_type": selected_equipment_type,  # 변경된 타입 저장
+            "status": status,
+            **direct_fields,  # 실제 컬럼
+            "details": json.dumps(extra_fields, ensure_ascii=False),  # 특화 필드
             "accessory_specs": json.dumps(accessory_specs, ensure_ascii=False),
             "spare_part_specs": json.dumps(spare_part_specs, ensure_ascii=False),
             "documents": json.dumps(documents, ensure_ascii=False),
-            "screw_specs": json.dumps(screw_specs, ensure_ascii=False),
-            "oil_specs": json.dumps(oil_specs + [{'notes': oil_notes}, {'aftercare': oil_aftercare}], ensure_ascii=False)
+            "screw_specs": json.dumps(screw_specs, ensure_ascii=False) if screw_specs else None,
+            "oil_specs": json.dumps(oil_specs_with_notes, ensure_ascii=False),
+            "image_urls": combined_image_urls
         }
-
-        if new_image_urls:
-            data["image_urls"] = new_image_urls
-
-        supabase.from_('equipment').update(data).eq('id', equipment_id).execute()
-        st.success("설비 정보가 성공적으로 업데이트되었습니다.")
+        
+        supabase.table('equipment').update(update_data).eq('id', equipment_id).execute()
         st.cache_data.clear()
-        st.session_state.selected_eq_id_admin = None
-        return True, "설비 정보가 성공적으로 업데이트되었습니다."
+        return True, "설비 정보가 업데이트되었습니다."
     except Exception as e:
-        st.error(f"설비 정보 업데이트에 실패했습니다. {e}")
-        return False, f"설비 정보 업데이트에 실패했습니다. {e}"
+        return False, str(e)
 
 def delete_equipment(equipment_id):
     current_eq_data = supabase.from_('equipment').select('image_urls').eq('id', equipment_id).single().execute().data
@@ -375,6 +430,113 @@ def get_date_value(date_str):
         except ValueError:
             pass
     return None
+
+# ============ 설비 템플릿 관리 함수 ============
+
+def get_equipment_templates():
+    """모든 활성화된 설비 템플릿 조회"""
+    try:
+        response = supabase.table('equipment_templates').select('*').eq('is_active', True).order('created_at').execute()  # 정렬 추가
+        return response.data if response.data else []  # None 체크 개선
+    except Exception as e:
+        st.error(f"템플릿 조회 실패: {str(e)}")
+        return []
+
+def get_template_by_name(name):
+    """특정 이름의 템플릿 조회"""
+    try:
+        response = supabase.table('equipment_templates').select('*').eq('name', name).eq('is_active', True).single().execute()  # is_active 체크 추가
+        return response.data
+    except Exception as e:
+        return None
+
+def add_equipment_template(name, display_name, fields_config):
+    """새 설비 템플릿 추가"""
+    try:
+        # 중복 체크 추가
+        existing = supabase.table('equipment_templates').select('id').eq('name', name).execute()
+        if existing.data:
+            return False, f"'{name}' 템플릿이 이미 존재합니다."
+        
+        data = {
+            'name': name,
+            'display_name': display_name,
+            'fields_config': fields_config
+        }
+        response = supabase.table('equipment_templates').insert(data).execute()
+        return True, "템플릿이 추가되었습니다."
+    except Exception as e:
+        return False, str(e)
+
+def update_equipment_template(template_id, fields_config):
+    """설비 템플릿 수정"""
+    try:
+        # updated_at은 DB에서 자동 처리되므로 NOW() 문자열이 아닌 datetime 사용
+        from datetime import datetime
+        data = {
+            'fields_config': fields_config,
+            'updated_at': datetime.now().isoformat()
+        }
+        response = supabase.table('equipment_templates').update(data).eq('id', template_id).execute()
+        return True, "템플릿이 수정되었습니다."
+    except Exception as e:
+        return False, str(e)
+
+def delete_equipment_template(template_id):
+    try:
+        response = (
+            supabase.table("equipment_templates")
+            .delete()
+            .eq("id", template_id)
+            .execute()
+        )
+
+        if response.data:
+            return True, "템플릿이 완전히 삭제되었습니다."
+        else:
+            return False, "해당 ID의 템플릿을 찾을 수 없습니다."
+    except Exception as e:
+        return False, str(e)
+
+
+# UI 함수
+def render_delete_ui(template_id):
+    st.warning(f"템플릿(ID={template_id})을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("✅ 삭제하기", key=f"delete_{template_id}"):
+            success, message = delete_equipment_template(template_id)
+            if success:
+                st.success(message)
+            else:
+                st.error(message)
+
+    with col2:
+        if st.button("❌ 취소", key=f"cancel_{template_id}"):
+            st.info("삭제가 취소되었습니다.")
+
+# 필드 정의 (모든 가능한 필드)
+FIELD_DEFINITIONS = {
+    # 사출기 전용
+    'min_mold_thickness': {'label': '최소금형두께', 'type': 'text'},
+    'max_mold_thickness': {'label': '최대금형두께', 'type': 'text'},
+    'tie_bar_spacing': {'label': '타이바간격', 'type': 'text'},
+    'plate_thickness': {'label': '플레이트두께', 'type': 'text'},
+    'oil_flow_rate': {'label': '오일유량', 'type': 'text'},
+    'max_displacement': {'label': '최대변위', 'type': 'text'},
+    
+    # CNC 전용
+    'spindle_speed': {'label': '스핀들 속도', 'type': 'text'},
+    'table_size': {'label': '테이블 크기', 'type': 'text'},
+    'axis_travel': {'label': '축 이동거리', 'type': 'text'},
+    'tool_capacity': {'label': '공구 용량', 'type': 'text'},
+    
+    # 프레스 전용
+    'press_capacity': {'label': '프레스 용량', 'type': 'text'},
+    'stroke_length': {'label': '스트로크 길이', 'type': 'text'},
+    'bed_size': {'label': '베드 크기', 'type': 'text'},
+}
 
 # ------------------------------------------------------
 # 5. 다국어 지원 딕셔너리
@@ -1140,7 +1302,64 @@ with header_cols[6]:
 
 # 로그인 화면
 if not st.session_state['authenticated']:
+    # 회사 로고를 타이틀 위로 이동
+    logo_url = "https://xvudytcfwnzjxhaortik.supabase.co/storage/v1/object/public/equipment_images/logo_image/logo.png"
+    st.image(logo_url, width=200)  # use_column_width 대체
+    
+    # 배경 이미지 CSS 설정
+    background_url = "https://xvudytcfwnzjxhaortik.supabase.co/storage/v1/object/public/equipment_images/logo_image/background.png"
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background-image: url("{background_url}");
+            background-size: contain;
+            background-repeat: no-repeat;
+            background-position: right center;  /* 배경을 오른쪽으로 정렬 */
+            background-attachment: fixed;
+            min-height: 100vh;
+        }}
+        @media (max-width: 600px) {{
+            .stApp {{
+                background-size: cover;
+                background-attachment: scroll;
+                background-position: center;  /* 모바일에서는 중앙으로 */
+            }}
+        }}
+        .stImage {{
+            margin-bottom: 20px;
+            margin-top: 10px;
+            display: block;
+            margin-left: auto;
+            margin-right: auto;
+        }}
+        @media (max-width: 600px) {{
+            .stImage > img {{
+                width: 120px !important;
+            }}
+        }}
+        .stApp > div {{
+            background-color: rgba(255, 255, 255, 0.7);
+            padding: 20px;
+            border-radius: 10px;
+            max-width: 1000px;  /* 너비 2배로 늘림 */
+            margin: 0;  /* 왼쪽 정렬 */
+            margin-left: 0;  /* 왼쪽 여백 0 */
+        }}
+        @media (max-width: 600px) {{
+            .stApp > div {{
+                max-width: 90%;
+                padding: 10px;
+                margin-left: 0;  /* 모바일에서도 왼쪽 정렬 */
+            }}
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+    
     st.title(get_translation('title') + ' - ' + get_translation('login_title'))
+    
     factories_list = get_factories()
     factory_names = [f['name'] for f in factories_list]
 
@@ -1163,12 +1382,6 @@ else:
     factory_id = st.session_state.current_factory['id']
     factory_name = st.session_state.current_factory['name']
     st.title(get_translation('title') + f" - {factory_name}")
-    header_cols = st.columns([1, 1, 1, 0.1, 0.1, 0.1, 0.1, 0.3])
-    with header_cols[7]:
-        if st.button(get_translation('logout'), key='logout_btn'):
-            st.session_state.authenticated = False
-            st.session_state.current_factory = None
-            st.rerun()
 
     # 탭 초기화
     tabs = st.tabs([
@@ -1203,6 +1416,7 @@ else:
                         expanded=False):
                     col1, col2 = st.columns([1, 2])
                     with col1:
+
                         # 이미지 표시
                         if eq.get('image_urls'):
                             image_urls = eq['image_urls'].split(',') if isinstance(eq['image_urls'], str) else []
@@ -1332,22 +1546,30 @@ else:
                         # 재료 사양
                         st.markdown("---")
                         st.subheader(get_translation('screw_specs'))
-                        material_specs = """
+                        # 설비 추가에서 입력한 재료 사양 정보 표시
+                        if st.session_state.screw_specs.get('material_spec_description'):
+                            # 줄바꿈을 제대로 표시하기 위해 \n을 마크다운 줄바꿈으로 변환
+                            material_spec_formatted = st.session_state.screw_specs['material_spec_description'].replace('\n', '  \n')
+                            st.markdown(material_spec_formatted)
+                        else:
+                            # 기본값 (데이터가 없을 경우)
+                            material_specs = """
                         A: 일반 수지류(PP, PE, ABS, POM, PMMA, PC, PET)  
                         B: GLASS WOOL 포함율 30% 이내(PC-GF, POM-GF, PA-GF, PBT-GF)  
                         C: GLASS WOOL 포함율 30% 이상(난연 ABS, 난연 PC, 난연 PBI, NYLON6,66)  
                         D: 400℃ 이상 온도 사용 제품
                         """
-                        st.markdown(material_specs)
-                    
+                            st.markdown(material_specs)
+
                         # 기타사항
                         st.markdown("---")
                         st.subheader(get_translation('other_notes'))
-                        other_notes = """
-                        1. 윤활유 MARKER 측의 점도 확인 후 사용 여부 결정하며 3개월/1회 점도 측정하여 부적합 시 교체한다.  
-                        *점도 관리 기준: 제조 MARKER의 시험 성적서 참조
-                        """
-                        st.markdown(other_notes)
+
+                        # 기존 하드코딩된 내용 대신 세션 스테이트의 데이터 표시
+                        if st.session_state.get('other_notes'):
+                            st.markdown(st.session_state['other_notes'])  # ← 여전히 필요! 화면에 표시
+                        else:
+                            st.info("기타사항 정보가 없습니다.")
                     
                         # 작동유 사양
                         st.markdown("---")
@@ -1355,6 +1577,7 @@ else:
                         try:
                             oil_specs = json.loads(eq.get('oil_specs', '[]'))
                             oil_specs_data = [item for item in oil_specs if 'notes' not in item and 'aftercare' not in item]
+    
                             if oil_specs_data:
                                 oil_df = pd.DataFrame(oil_specs_data)
                                 st.dataframe(
@@ -1367,12 +1590,16 @@ else:
                                 )
                             else:
                                 st.info(f"{get_translation('oil_specs')} 없음")
+    
                             oil_notes = next((item['notes'] for item in oil_specs if 'notes' in item), '')
                             oil_aftercare = next((item['aftercare'] for item in oil_specs if 'aftercare' in item), '')
+    
                             if oil_notes:
                                 st.markdown(f"**{get_translation('oil_notes')}:** {oil_notes}")
                             if oil_aftercare:
-                                st.markdown(f"**{get_translation('other_notes')}:** {oil_aftercare}")
+                                # 줄바꿈을 제대로 표시하기 위해 \n을 마크다운 줄바꿈으로 변환
+                                oil_aftercare_formatted = oil_aftercare.replace('\n', '  \n')
+                                st.markdown(f"**{get_translation('other_notes')}:**  \n{oil_aftercare_formatted}")
                         except:
                             st.info(f"{get_translation('oil_specs')} 데이터 로드 오류")
                     
@@ -1418,309 +1645,404 @@ else:
                         else:
                             st.info(get_translation('no_status_history'))
 
-    # ------------------------ 설비 추가 ------------------------
+# ------------------------ 설비 추가 ------------------------
     with tabs[1]:
         st.header(get_translation('add_equipment'))
-
-        with st.form("add_equipment_form"):
-            st.markdown(f"##### {get_translation('basic_info')}")
-            name = st.text_input(get_translation('equipment_name'), key="add_eq_name")
-            product_name = st.text_input(get_translation('product_name'), key="add_eq_product_name")
-            maker = st.text_input(get_translation('maker'), key="add_eq_maker")
-            model = st.text_input(get_translation('model'), key="add_eq_model")
-            serial_number = st.text_input(get_translation('serial_number'), key="add_eq_serial_number")
-            production_date = st.date_input(get_translation('production_date'), key="add_eq_production_date")
-            acquisition_cost = st.text_input(get_translation('acquisition_cost'), key="add_eq_acquisition_cost")
-            acquisition_date = st.date_input(get_translation('acquisition_date'), key="add_eq_acquisition_date")
-            acquisition_basis = st.text_input(get_translation('acquisition_basis'), key="add_eq_acquisition_basis")
-            purchase_date = st.date_input(get_translation('purchase_date'), key="add_eq_purchase_date")
-            installation_location = st.text_input(get_translation('installation_location'), key="add_eq_installation_location")
-            min_mold_thickness = st.text_input(get_translation('min_mold_thickness'), key="add_eq_min_mold_thickness")
-            max_mold_thickness = st.text_input(get_translation('max_mold_thickness'), key="add_eq_max_mold_thickness")
-            tie_bar_spacing = st.text_input(get_translation('tie_bar_spacing'), key="add_eq_tie_bar_spacing")
-            plate_thickness = st.text_input(get_translation('plate_thickness'), key="add_eq_plate_thickness")
-            oil_flow_rate = st.text_input(get_translation('oil_flow_rate'), key="add_eq_oil_flow_rate")
-            max_displacement = st.text_input(get_translation('max_displacement'), key="add_eq_max_displacement")
-            motor_capacity = st.text_input(get_translation('motor_capacity_specs'), key="add_eq_motor_capacity")
-            heater_capacity = st.text_input(get_translation('heater_capacity_specs'), key="add_eq_heater_capacity")
-            total_weight = st.text_input(get_translation('total_weight'), key="add_eq_total_weight")
-            st.markdown("---")
-
-            # 부속기기 사양
-            with st.expander(get_translation('accessory_specs'), expanded=False):
-                st.markdown(f"**{get_translation('add_row_instruction')}**")
-                accessory_df = pd.DataFrame(
-                    st.session_state.accessory_specs if st.session_state.accessory_specs else [],
-                    columns=['순번', '부속기기 명', '형식', '제작번호', '용량 및 규격', '제조처', '비고']
-                )
-                edited_accessory_df = st.data_editor(
-                    accessory_df.rename(columns={
-                        '순번': get_translation('col_seq'),
-                        '부속기기 명': get_translation('col_accessory_name'),
-                        '형식': get_translation('col_accessory_type'),
-                        '제작번호': get_translation('col_accessory_serial'),
-                        '용량 및 규격': get_translation('col_capacity_spec'),
-                        '제조처': get_translation('col_maker'),
-                        '비고': get_translation('col_notes')
-                    }),
-                    num_rows="dynamic",
-                    width='stretch',
-                    key="accessory_data_editor"
-                )
-                st.session_state.accessory_specs = edited_accessory_df.rename(columns={
-                    get_translation('col_seq'): '순번',
-                    get_translation('col_accessory_name'): '부속기기 명',
-                    get_translation('col_accessory_type'): '형식',
-                    get_translation('col_accessory_serial'): '제작번호',
-                    get_translation('col_capacity_spec'): '용량 및 규격',
-                    get_translation('col_maker'): '제조처',
-                    get_translation('col_notes'): '비고'
-                }).to_dict('records')
-                # 순번 자동 업데이트
-                for idx, spec in enumerate(st.session_state.accessory_specs):
-                    spec['순번'] = idx + 1
-                if st.session_state.accessory_specs:
-                    st.write(f"**현재 {len(st.session_state.accessory_specs)}개의 부속기기가 등록되어 있습니다.**")
-            st.markdown("---")
-
-            # SPARE PART 사양
-            with st.expander(get_translation('spare_part_specs'), expanded=False):
-                st.markdown(f"**{get_translation('add_row_instruction')}**")
-                spare_part_df = pd.DataFrame(
-                    st.session_state.spare_part_specs if st.session_state.spare_part_specs else [],
-                    columns=['SPARE PART', '교체 주기', '교체 일자']
-                )
-                edited_spare_part_df = st.data_editor(
-                    spare_part_df.rename(columns={
-                        'SPARE PART': get_translation('col_spare_part'),
-                        '교체 주기': get_translation('col_maintenance_cycle'),
-                        '교체 일자': get_translation('col_replacement_date')
-                    }),
-                    num_rows="dynamic",
-                    column_config={
-                        get_translation('col_replacement_date'): st.column_config.DateColumn(
-                            get_translation('col_replacement_date'),
-                            min_value=date(1950, 1, 1),
-                            format="YYYY-MM-DD"
-                        )
-                    },
-                    width='stretch',
-                    key="spare_part_data_editor"
-                )
-                st.session_state.spare_part_specs = edited_spare_part_df.rename(columns={
-                    get_translation('col_spare_part'): 'SPARE PART',
-                    get_translation('col_maintenance_cycle'): '교체 주기',
-                    get_translation('col_replacement_date'): '교체 일자'
-                }).to_dict('records')
-                if st.session_state.spare_part_specs:
-                    st.write(f"**현재 {len(st.session_state.spare_part_specs)}개의 SPARE PART가 등록되어 있습니다.**")
-            st.markdown("---")
-
-            # 문서
-            with st.expander(get_translation('documents'), expanded=False):
-                st.markdown(f"**{get_translation('add_row_instruction')}**")
-                documents_df = pd.DataFrame(
-                    st.session_state.documents if st.session_state.documents else [],
-                    columns=['기술 자료명', '취급 설명서', '전기 도면', '유.증압도면', '윤활 기준표']
-                )
-                edited_documents_df = st.data_editor(
-                    documents_df.rename(columns={
-                        '기술 자료명': get_translation('col_doc_name'),
-                        '취급 설명서': get_translation('col_manual'),
-                        '전기 도면': get_translation('col_electric_drawing'),
-                        '유.증압도면': get_translation('col_hydraulic_drawing'),
-                        '윤활 기준표': get_translation('col_lubrication_std')
-                    }),
-                    num_rows="dynamic",
-                    width='stretch',
-                    key="documents_data_editor"
-                )
-                st.session_state.documents = edited_documents_df.rename(columns={
-                    get_translation('col_doc_name'): '기술 자료명',
-                    get_translation('col_manual'): '취급 설명서',
-                    get_translation('col_electric_drawing'): '전기 도면',
-                    get_translation('col_hydraulic_drawing'): '유.증압도면',
-                    get_translation('col_lubrication_std'): '윤활 기준표'
-                }).to_dict('records')
-                if st.session_state.documents:
-                    st.write(f"**현재 {len(st.session_state.documents)}개의 문서가 등록되어 있습니다.**")
-
-            # 스크류 사양
-            with st.expander(get_translation('screw_specs'), expanded=False):
-                st.markdown("###### 1) 재료 사양 기준")
-                col_h1, col_h2, col_h3 = st.columns([2, 2, 6])
-                with col_h1:
-                    st.markdown("**스크류 규격**")
-                with col_h2:
-                    st.markdown("**해당사항**")
-                with col_h3:
-                    st.markdown("**재료 사양**")
-                col_data1, col_data2, col_data3 = st.columns([2, 2, 6])
-                with col_data1:
-                    st.session_state.screw_specs['screw_type_general'] = st.text_input(
-                        "일반 수지용 SCREW 규격",
-                        value=st.session_state.screw_specs.get('screw_type_general', '일반 수지용 SCREW'),
-                        key="screw_spec_general"
-                    )
-                with col_data2:
-                    st.session_state.screw_specs['applicable_general'] = st.text_input(
-                        "일반 수지용 SCREW 해당사항",
-                        value=st.session_state.screw_specs.get('applicable_general', ''),
-                        key="applicable_general"
-                    )
-                with col_data3:
-                    st.session_state.screw_specs['material_spec_description'] = st.text_area(
-                        "재료 사양 내용",
-                        value=st.session_state.screw_specs.get('material_spec_description', ''),
-                        key="material_spec_merged_content",
-                        height=150
-                    )
-                col_data4, col_data5, _ = st.columns([2, 2, 6])
-                with col_data4:
-                    st.session_state.screw_specs['screw_type_wear'] = st.text_input(
-                        "내마모성 SCREW 규격",
-                        value=st.session_state.screw_specs.get('screw_type_wear', '내 마모성 SCREW'),
-                        key="screw_spec_wear"
-                    )
-                with col_data5:
-                    st.session_state.screw_specs['applicable_wear'] = st.text_input(
-                        "내마모성 SCREW 해당사항",
-                        value=st.session_state.screw_specs.get('applicable_wear', ''),
-                        key="applicable_wear"
-                    )
+    
+        # 설비 템플릿 로드
+        templates = get_equipment_templates()
+        template_options = {t['display_name']: t for t in templates}
+    
+        # 설비 타입 선택
+        selected_template_name = st.selectbox(
+            "🔧 설비 종류를 선택하세요",
+            options=['선택하세요'] + list(template_options.keys()),
+            key="equipment_type_selector"
+        )
+    
+        if selected_template_name != '선택하세요':
+            selected_template = template_options[selected_template_name]
+            fields_config = selected_template['fields_config']
+        
+            with st.form("add_equipment_form"):
+                st.markdown(f"##### {get_translation('basic_info')}")
+            
+                # ========== 공통 필드 (모든 설비에 공통) ==========
+                # 첫 번째 행: 설비명, 제품명, 제조사
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    name = st.text_input(get_translation('equipment_name'), key="add_eq_name")
+                with col2:
+                    product_name = st.text_input(get_translation('product_name'), key="add_eq_product_name")
+                with col3:
+                    maker = st.text_input(get_translation('maker'), key="add_eq_maker")
+            
+                # 두 번째 행: 모델명, 시리얼번호, 제작일
+                col4, col5, col6 = st.columns(3)
+                with col4:
+                    model = st.text_input(get_translation('model'), key="add_eq_model")
+                with col5:
+                    serial_number = st.text_input(get_translation('serial_number'), key="add_eq_serial_number")
+                with col6:
+                    production_date = st.date_input(get_translation('production_date'), key="add_eq_production_date")
+            
+                # 세 번째 행: 취득가액, 취득일, 취득근거
+                col7, col8, col9 = st.columns(3)
+                with col7:
+                    acquisition_cost = st.text_input(get_translation('acquisition_cost'), key="add_eq_acquisition_cost")
+                with col8:
+                    acquisition_date = st.date_input(get_translation('acquisition_date'), key="add_eq_acquisition_date")
+                with col9:
+                    acquisition_basis = st.text_input(get_translation('acquisition_basis'), key="add_eq_acquisition_basis")
+            
+                # 네 번째 행: 구입일, 설치장소, 모터용량
+                col10, col11, col12 = st.columns(3)
+                with col10:
+                    purchase_date = st.date_input(get_translation('purchase_date'), key="add_eq_purchase_date")
+                with col11:
+                    installation_location = st.text_input(get_translation('installation_location'), key="add_eq_installation_location")
+                with col12:
+                    motor_capacity = st.text_input(get_translation('motor_capacity_specs'), key="add_eq_motor_capacity")
+            
+                # 다섯 번째 행: 히터용량, 총중량
+                col13, col14, col15 = st.columns(3)
+                with col13:
+                    heater_capacity = st.text_input(get_translation('heater_capacity_specs'), key="add_eq_heater_capacity")
+                with col14:
+                    total_weight = st.text_input(get_translation('total_weight'), key="add_eq_total_weight")
+                with col15:
+                    st.empty()  # 빈 공간
+            
                 st.markdown("---")
-                cols_tables_and_note = st.columns([7, 3])
-                with cols_tables_and_note[0]:
-                    st.markdown("###### 2) 일반용 SCREW")
-                    st.session_state.screw_specs['general_cycle_df'] = st.data_editor(
-                        pd.DataFrame(st.session_state.screw_specs['general_cycle']),
-                        key="general_screw_cycle_editor",
-                        hide_index=True,
-                        column_order=("해당 사양", "A", "B", "C", "D"),
-                        column_config={
-                            "해당 사양": st.column_config.TextColumn("해당 사양", disabled=True),
-                            "A": st.column_config.NumberColumn("A", min_value=1, format="%d"),
-                            "B": st.column_config.NumberColumn("B", min_value=1, format="%d"),
-                            "C": st.column_config.NumberColumn("C", min_value=1, format="%d"),
-                            "D": st.column_config.NumberColumn("D", min_value=1, format="%d"),
-                        },
-                        width='stretch'
+            
+                # ========== 설비 타입별 특화 필드 (동적으로 표시) ==========
+                specific_fields = fields_config.get('specific_fields', [])
+            
+                if specific_fields:
+                    st.markdown(f"##### {selected_template_name} 전용 사양")
+                
+                    specific_fields_data = {}
+                
+                    # 3열씩 배치
+                    for i in range(0, len(specific_fields), 3):
+                        cols = st.columns(3)
+                        for j in range(3):
+                            idx = i + j
+                            if idx < len(specific_fields):
+                                field_key = specific_fields[idx]
+                                field_def = FIELD_DEFINITIONS.get(field_key, {'label': field_key, 'type': 'text'})
+                            
+                                with cols[j]:
+                                    if field_def['type'] == 'text':
+                                        specific_fields_data[field_key] = st.text_input(
+                                            field_def['label'],
+                                            key=f"add_spec_{field_key}"
+                                        )
+                
+                    st.markdown("---")
+
+                # ========== 조건부 섹션들 ==========
+            
+                # 부속기기 사양
+                if fields_config.get('has_accessory_specs', True):
+                    with st.expander(get_translation('accessory_specs'), expanded=False):
+                        st.markdown(f"**{get_translation('add_row_instruction')}**")
+                        accessory_df = pd.DataFrame(
+                            st.session_state.accessory_specs if st.session_state.accessory_specs else [],
+                            columns=['순번', '부속기기 명', '형식', '제작번호', '용량 및 규격', '제조처', '비고']
+                        )
+                        edited_accessory_df = st.data_editor(
+                            accessory_df.rename(columns={
+                                '순번': get_translation('col_seq'),
+                                '부속기기 명': get_translation('col_accessory_name'),
+                                '형식': get_translation('col_accessory_type'),
+                                '제작번호': get_translation('col_accessory_serial'),
+                                '용량 및 규격': get_translation('col_capacity_spec'),
+                                '제조처': get_translation('col_maker'),
+                                '비고': get_translation('col_notes')
+                            }),
+                            num_rows="dynamic",
+                            width='stretch',
+                            key="accessory_data_editor"
+                        )
+                        st.session_state.accessory_specs = edited_accessory_df.rename(columns={
+                            get_translation('col_seq'): '순번',
+                            get_translation('col_accessory_name'): '부속기기 명',
+                            get_translation('col_accessory_type'): '형식',
+                            get_translation('col_accessory_serial'): '제작번호',
+                            get_translation('col_capacity_spec'): '용량 및 규격',
+                            get_translation('col_maker'): '제조처',
+                            get_translation('col_notes'): '비고'
+                        }).to_dict('records')
+                        # 순번 자동 업데이트
+                        for idx, spec in enumerate(st.session_state.accessory_specs):
+                            spec['순번'] = idx + 1
+                        if st.session_state.accessory_specs:
+                            st.write(f"**현재 {len(st.session_state.accessory_specs)}개의 부속기기가 등록되어 있습니다.**")
+                    st.markdown("---")
+
+                # SPARE PART 사양
+                if fields_config.get('has_spare_part_specs', True):
+                    with st.expander(get_translation('spare_part_specs'), expanded=False):
+                        st.markdown(f"**{get_translation('add_row_instruction')}**")
+                        spare_part_df = pd.DataFrame(
+                            st.session_state.spare_part_specs if st.session_state.spare_part_specs else [],
+                            columns=['SPARE PART', '교체 주기', '교체 일자']
+                        )
+                        edited_spare_part_df = st.data_editor(
+                            spare_part_df.rename(columns={
+                                'SPARE PART': get_translation('col_spare_part'),
+                                '교체 주기': get_translation('col_maintenance_cycle'),
+                                '교체 일자': get_translation('col_replacement_date')
+                            }),
+                            num_rows="dynamic",
+                            column_config={
+                                get_translation('col_replacement_date'): st.column_config.DateColumn(
+                                    get_translation('col_replacement_date'),
+                                    min_value=date(1950, 1, 1),
+                                    format="YYYY-MM-DD"
+                                )
+                            },
+                            width='stretch',
+                            key="spare_part_data_editor"
+                        )
+                        st.session_state.spare_part_specs = edited_spare_part_df.rename(columns={
+                            get_translation('col_spare_part'): 'SPARE PART',
+                            get_translation('col_maintenance_cycle'): '교체 주기',
+                            get_translation('col_replacement_date'): '교체 일자'
+                        }).to_dict('records')
+                        if st.session_state.spare_part_specs:
+                            st.write(f"**현재 {len(st.session_state.spare_part_specs)}개의 SPARE PART가 등록되어 있습니다.**")
+                    st.markdown("---")
+
+                # 문서
+                with st.expander(get_translation('documents'), expanded=False):
+                    st.markdown(f"**{get_translation('add_row_instruction')}**")
+                    documents_df = pd.DataFrame(
+                        st.session_state.documents if st.session_state.documents else [],
+                        columns=['기술 자료명', '취급 설명서', '전기 도면', '유.증압도면', '윤활 기준표']
                     )
-                    st.markdown("###### 3) 내마모성 SCREW")
-                    st.session_state.screw_specs['wear_resistant_cycle_df'] = st.data_editor(
-                        pd.DataFrame(st.session_state.screw_specs['wear_resistant_cycle']),
-                        key="wear_resistant_screw_cycle_editor",
-                        hide_index=True,
-                        column_order=("해당 사양", "A", "B", "C", "D"),
-                        column_config={
-                            "해당 사양": st.column_config.TextColumn("해당 사양", disabled=True),
-                            "A": st.column_config.NumberColumn("A", min_value=1, format="%d"),
-                            "B": st.column_config.NumberColumn("B", min_value=1, format="%d"),
-                            "C": st.column_config.NumberColumn("C", min_value=1, format="%d"),
-                            "D": st.column_config.NumberColumn("D", min_value=1, format="%d"),
-                        },
-                        width='stretch'
+                    edited_documents_df = st.data_editor(
+                        documents_df.rename(columns={
+                            '기술 자료명': get_translation('col_doc_name'),
+                            '취급 설명서': get_translation('col_manual'),
+                            '전기 도면': get_translation('col_electric_drawing'),
+                            '유.증압도면': get_translation('col_hydraulic_drawing'),
+                            '윤활 기준표': get_translation('col_lubrication_std')
+                        }),
+                        num_rows="dynamic",
+                        width='stretch',
+                        key="documents_data_editor"
                     )
-                with cols_tables_and_note[1]:
-                    st.markdown("###### 작동유 점도 측정 방법")
-                    note_text = """
+                    st.session_state.documents = edited_documents_df.rename(columns={
+                        get_translation('col_doc_name'): '기술 자료명',
+                        get_translation('col_manual'): '취급 설명서',
+                        get_translation('col_electric_drawing'): '전기 도면',
+                        get_translation('col_hydraulic_drawing'): '유.증압도면',
+                        get_translation('col_lubrication_std'): '윤활 기준표'
+                    }).to_dict('records')
+                    if st.session_state.documents:
+                        st.write(f"**현재 {len(st.session_state.documents)}개의 문서가 등록되어 있습니다.**")
+
+                # 스크류 사양 (사출기만)
+                if fields_config.get('has_screw_specs', False):
+                    with st.expander(get_translation('screw_specs'), expanded=False):
+                        st.markdown("###### 1) 재료 사양 기준")
+                        col_h1, col_h2, col_h3 = st.columns([2, 2, 6])
+                        with col_h1:
+                            st.markdown("**스크류 규격**")
+                        with col_h2:
+                            st.markdown("**해당사항**")
+                        with col_h3:
+                            st.markdown("**재료 사양**")
+                        col_data1, col_data2, col_data3 = st.columns([2, 2, 6])
+                        with col_data1:
+                            st.session_state.screw_specs['screw_type_general'] = st.text_input(
+                                "일반 수지용 SCREW 규격",
+                                value=st.session_state.screw_specs.get('screw_type_general', '일반 수지용 SCREW'),
+                                key="screw_spec_general"
+                            )
+                        with col_data2:
+                            st.session_state.screw_specs['applicable_general'] = st.text_input(
+                                "일반 수지용 SCREW 해당사항",
+                                value=st.session_state.screw_specs.get('applicable_general', ''),
+                                key="applicable_general"
+                            )
+                        with col_data3:
+                            st.session_state.screw_specs['material_spec_description'] = st.text_area(
+                                "재료 사양 내용",
+                                value=st.session_state.screw_specs.get('material_spec_description', ''),
+                                key="material_spec_merged_content",
+                                height=150
+                            )
+                        col_data4, col_data5, _ = st.columns([2, 2, 6])
+                        with col_data4:
+                            st.session_state.screw_specs['screw_type_wear'] = st.text_input(
+                                "내마모성 SCREW 규격",
+                                value=st.session_state.screw_specs.get('screw_type_wear', '내 마모성 SCREW'),
+                                key="screw_spec_wear"
+                            )
+                        with col_data5:
+                            st.session_state.screw_specs['applicable_wear'] = st.text_input(
+                                "내마모성 SCREW 해당사항",
+                                value=st.session_state.screw_specs.get('applicable_wear', ''),
+                                key="applicable_wear"
+                            )
+                        st.markdown("---")
+                    
+                        st.markdown("###### 2) 일반용 SCREW")
+                        st.session_state.screw_specs['general_cycle_df'] = st.data_editor(
+                            pd.DataFrame(st.session_state.screw_specs['general_cycle']),
+                            key="general_screw_cycle_editor",
+                            hide_index=True,
+                            column_order=("해당 사양", "A", "B", "C", "D"),
+                            column_config={
+                                "해당 사양": st.column_config.TextColumn("해당 사양", disabled=True),
+                                "A": st.column_config.NumberColumn("A", min_value=1, format="%d"),
+                                "B": st.column_config.NumberColumn("B", min_value=1, format="%d"),
+                                "C": st.column_config.NumberColumn("C", min_value=1, format="%d"),
+                                "D": st.column_config.NumberColumn("D", min_value=1, format="%d"),
+                            },
+                            width='stretch'
+                        )
+                    
+                        st.markdown("###### 3) 내마모성 SCREW")
+                        st.session_state.screw_specs['wear_resistant_cycle_df'] = st.data_editor(
+                            pd.DataFrame(st.session_state.screw_specs['wear_resistant_cycle']),
+                            key="wear_resistant_screw_cycle_editor",
+                            hide_index=True,
+                            column_order=("해당 사양", "A", "B", "C", "D"),
+                            column_config={
+                                "해당 사양": st.column_config.TextColumn("해당 사양", disabled=True),
+                                "A": st.column_config.NumberColumn("A", min_value=1, format="%d"),
+                                "B": st.column_config.NumberColumn("B", min_value=1, format="%d"),
+                                "C": st.column_config.NumberColumn("C", min_value=1, format="%d"),
+                                "D": st.column_config.NumberColumn("D", min_value=1, format="%d"),
+                            },
+                            width='stretch'
+                        )
+                    st.markdown("---")
+
+                # 작동유 사양
+                if fields_config.get('has_oil_specs', True):
+                    with st.expander(get_translation('oil_specs'), expanded=False):
+                        st.markdown(f"**{get_translation('add_row_instruction')}**")
+                    
+                        cols_tables_and_note = st.columns([7, 3])
+                    
+                        with cols_tables_and_note[0]:
+                            if len(st.session_state.oil_specs) > 0:
+                                st.write(f"**현재 {len(st.session_state.oil_specs)}개의 작동유 항목이 등록되어 있습니다.**")
+                                oil_df = pd.DataFrame(st.session_state.oil_specs)
+                                edited_oil_df = st.data_editor(
+                                    oil_df.rename(columns={
+                                        '구분': get_translation('col_category'),
+                                        '적용 작동유 SPCE': get_translation('col_applicable_oil'),
+                                        '교체 주기': get_translation('col_maintenance_cycle')
+                                    }),
+                                    num_rows="dynamic",
+                                    width='stretch',
+                                    key="oil_data_editor"
+                                )
+                                st.session_state.oil_specs = edited_oil_df.rename(columns={
+                                    get_translation('col_category'): '구분',
+                                    get_translation('col_applicable_oil'): '적용 작동유 SPCE',
+                                    get_translation('col_maintenance_cycle'): '교체 주기'
+                                }).to_dict('records')
+                            else:
+                                st.info(f"{get_translation('oil_specs')} 없음")
+                    
+                        with cols_tables_and_note[1]:
+                            st.markdown("###### 작동유 점도 측정 방법")
+                            note_text = """
 * 작동유 점도 측정 방법
 1. 육안검사
   각기 다른 용기에 담긴 시료와 새 오일의 색상,투명도,이물질 등을 비교 평가한다
 2. 낙적검사
   여과지에 시료를 몇방울 떨어뜨려 2-3시간후 관찰하여 얼룩여부 확인 --얼룩 없을시 합격처리함
 """
-                    st.markdown(note_text)
-            st.markdown("---")
+                            st.markdown(note_text)
+                    st.markdown("---")
 
-            # 작동유 사양
-            with st.expander(get_translation('oil_specs'), expanded=False):
-                st.markdown(f"**{get_translation('add_row_instruction')}**")
-                if len(st.session_state.oil_specs) > 0:
-                    st.write(f"**현재 {len(st.session_state.oil_specs)}개의 작동유 항목이 등록되어 있습니다.**")
-                    oil_df = pd.DataFrame(st.session_state.oil_specs)
-                    edited_oil_df = st.data_editor(
-                        oil_df.rename(columns={
-                            '구분': get_translation('col_category'),
-                            '적용 작동유 SPCE': get_translation('col_applicable_oil'),
-                            '교체 주기': get_translation('col_maintenance_cycle')
-                        }),
-                        num_rows="dynamic",
-                        width='stretch',
-                        key="oil_data_editor"
-                    )
-                    st.session_state.oil_specs = edited_oil_df.rename(columns={
-                        get_translation('col_category'): '구분',
-                        get_translation('col_applicable_oil'): '적용 작동유 SPCE',
-                        get_translation('col_maintenance_cycle'): '교체 주기'
-                    }).to_dict('records')
-                else:
-                    st.info(f"{get_translation('oil_specs')} 없음")
-            st.markdown("---")
+                # 기타사항 및 이미지 업로드
+                st.session_state.other_notes = st.text_area(get_translation('other_notes'), value=st.session_state.get('other_notes', ''), key="add_other_notes")
+                uploaded_images = st.file_uploader(get_translation('upload_image'), type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key="add_eq_images")
+            
+                if fields_config.get('has_oil_specs', True):
+                    st.markdown("**1년 경과 후 사후관리 방안:**")
+                    st.markdown("*아래에 내용을 작성하세요. 줄바꿈이 자동으로 적용됩니다.*")
+                    st.session_state.oil_aftercare = st.text_area("사후관리 내용", value=st.session_state.get('oil_aftercare', ''), key="add_oil_aftercare", height=100, label_visibility="collapsed")
 
-            # 기타사항 및 이미지 업로드
-            st.session_state.other_notes = st.text_area(get_translation('other_notes'), value=st.session_state.get('other_notes', ''), key="add_other_notes")
-            uploaded_images = st.file_uploader(get_translation('upload_image'), type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key="add_eq_images")
-            st.markdown("**1년 경과 후 사후관리 방안:**")
-            st.markdown("*아래에 내용을 작성하세요. 줄바꿈이 자동으로 적용됩니다.*")
-            st.session_state.oil_aftercare = st.text_area("사후관리 내용", value=st.session_state.get('oil_aftercare', ''), key="add_oil_aftercare", height=100, label_visibility="collapsed")
-
-            # 설비 추가 최종 제출 버튼
-            if st.form_submit_button(get_translation('add_equipment_button'), type="primary"):
-                image_urls_str = upload_images(uploaded_images) if uploaded_images else ""
-                if factory_id and name and model:
-                    screw_specs_to_add = {
-                        'material_spec_description': st.session_state.screw_specs.get('material_spec_description', ''),
-                        'screw_type_general': st.session_state.screw_specs.get('screw_type_general', ''),
-                        'applicable_general': st.session_state.screw_specs.get('applicable_general', ''),
-                        'screw_type_wear': st.session_state.screw_specs.get('screw_type_wear', ''),
-                        'applicable_wear': st.session_state.screw_specs.get('applicable_wear', ''),
-                        'general_cycle': st.session_state.screw_specs['general_cycle_df'].to_dict('records'),
-                        'wear_resistant_cycle': st.session_state.screw_specs['wear_resistant_cycle_df'].to_dict('records')
-                    }
-                    details_dict = {
-                        'product_name': product_name,
-                        'maker': maker,
-                        'serial_number': serial_number,
-                        'production_date': str(production_date) if production_date else None,
-                        'acquisition_cost': acquisition_cost,
-                        'acquisition_date': str(acquisition_date) if acquisition_date else None,
-                        'acquisition_basis': acquisition_basis,
-                        'purchase_date': str(purchase_date) if purchase_date else None,
-                        'installation_location': installation_location,
-                        'motor_capacity': motor_capacity,
-                        'heater_capacity': heater_capacity,
-                        'min_mold_thickness': min_mold_thickness,
-                        'max_mold_thickness': max_mold_thickness,
-                        'tie_bar_spacing': tie_bar_spacing,
-                        'plate_thickness': plate_thickness,
-                        'oil_flow_rate': oil_flow_rate,
-                        'max_displacement': max_displacement,
-                        'total_weight': total_weight,
-                        'other_notes': st.session_state.other_notes
-                    }
-                    success, message = add_equipment(
-                        factory_id=factory_id,
-                        name=name,
-                        model=model,
-                        details_dict=details_dict,
-                        accessory_specs=st.session_state.accessory_specs,
-                        spare_part_specs=st.session_state.spare_part_specs,
-                        documents=st.session_state.documents,
-                        screw_specs=screw_specs_to_add,
-                        oil_specs=st.session_state.oil_specs + [{'notes': '1년 경과 후 사후관리 방안'}, {'aftercare': st.session_state.oil_aftercare}],
-                        image_urls=image_urls_str
-                    )
-                    if success:
-                        reset_add_equipment_form_state()
-                        st.session_state.other_notes = ''
-                        st.session_state.oil_aftercare = ''
-                        st.success("설비가 성공적으로 추가되었습니다.")
-                        st.rerun()
+                # 설비 추가 최종 제출 버튼
+                if st.form_submit_button(get_translation('add_equipment_button'), type="primary"):
+                    image_urls_str = upload_images(uploaded_images) if uploaded_images else ""
+                
+                    if factory_id and name and model:
+                        # details_dict 구성 (공통 필드 + 특화 필드)
+                        details_dict = {
+                            'product_name': product_name,
+                            'maker': maker,
+                            'serial_number': serial_number,
+                            'production_date': str(production_date) if production_date else None,
+                            'acquisition_cost': acquisition_cost,
+                            'acquisition_date': str(acquisition_date) if acquisition_date else None,
+                            'acquisition_basis': acquisition_basis,
+                            'purchase_date': str(purchase_date) if purchase_date else None,
+                            'installation_location': installation_location,
+                            'motor_capacity': motor_capacity,
+                            'heater_capacity': heater_capacity,
+                            'total_weight': total_weight,
+                            'other_notes': st.session_state.other_notes,
+                            **specific_fields_data  # 특화 필드 추가
+                        }
+                    
+                        # 스크류 사양 (있을 경우만)
+                        screw_specs_to_add = None
+                        if fields_config.get('has_screw_specs', False):
+                            screw_specs_to_add = {
+                                'material_spec_description': st.session_state.screw_specs.get('material_spec_description', ''),
+                                'screw_type_general': st.session_state.screw_specs.get('screw_type_general', ''),
+                                'applicable_general': st.session_state.screw_specs.get('applicable_general', ''),
+                                'screw_type_wear': st.session_state.screw_specs.get('screw_type_wear', ''),
+                                'applicable_wear': st.session_state.screw_specs.get('applicable_wear', ''),
+                                'general_cycle': st.session_state.screw_specs['general_cycle_df'].to_dict('records'),
+                                'wear_resistant_cycle': st.session_state.screw_specs['wear_resistant_cycle_df'].to_dict('records')
+                            }
+                    
+                        # 작동유 사양 (있을 경우만)
+                        oil_specs_to_add = []
+                        if fields_config.get('has_oil_specs', True):
+                            oil_specs_to_add = st.session_state.oil_specs + [
+                                {'notes': '1년 경과 후 사후관리 방안'},
+                                {'aftercare': st.session_state.oil_aftercare}
+                            ]
+                    
+                        success, message = add_equipment(
+                            factory_id=factory_id,
+                            name=name,
+                            model=model,
+                            equipment_type=selected_template['name'],  # 템플릿 이름 저장
+                            details_dict=details_dict,
+                            accessory_specs=st.session_state.accessory_specs if fields_config.get('has_accessory_specs', True) else [],
+                            spare_part_specs=st.session_state.spare_part_specs if fields_config.get('has_spare_part_specs', True) else [],
+                            documents=st.session_state.documents,
+                            screw_specs=screw_specs_to_add,
+                            oil_specs=oil_specs_to_add,
+                            image_urls=image_urls_str
+                        )
+                    
+                        if success:
+                            reset_add_equipment_form_state()
+                            st.session_state.other_notes = ''
+                            st.session_state.oil_aftercare = ''
+                            st.success("설비가 성공적으로 추가되었습니다.")
+                            st.rerun()
+                        else:
+                            st.error(f"설비 추가 실패: {message}")
                     else:
-                        st.error(f"설비 추가 실패: {message}")
-                else:
-                    st.error("필수 정보를 모두 입력해주세요: 설비명, 모델")
+                        st.error("필수 정보를 모두 입력해주세요: 설비명, 모델")
+        else:
+            st.info("👆 먼저 설비 종류를 선택해주세요.")
 
 # ------------------------ 정비 이력 추가 ------------------------
     with tabs[2]:
@@ -1922,6 +2244,7 @@ else:
                 get_translation('add_factory'),
                 get_translation('factory_update_delete'),
                 get_translation('update_delete_equipment'),
+                "⚙️ 설비 템플릿 관리",  # 새 탭
                 get_translation('update_log_admin'),
                 get_translation('update_status_admin')
             ])
@@ -1982,29 +2305,111 @@ else:
                 if st.session_state.selected_eq_id_admin:
                     eq_data = next((eq for eq in equipment_list if eq['id'] == st.session_state.selected_eq_id_admin), None)
                     if eq_data:
+                        # 설비 타입 조회
+                        equipment_type = eq_data.get('equipment_type', 'injection_molding')
+
+                        # 설비 타입 선택 (변경 가능)
+                        templates = get_equipment_templates()
+                        template_options = {t['name']: t['display_name'] for t in templates}
+                        selected_equipment_type = st.selectbox(
+                            "설비 종류",
+                            options=list(template_options.keys()),
+                            format_func=lambda x: template_options[x],
+                            index=list(template_options.keys()).index(equipment_type) if equipment_type in template_options else 0,
+                            key="update_equipment_type"
+                        )
+
+                        template = get_template_by_name(selected_equipment_type)
+            
+                        # details에서 특화 필드 추출
+                        details_json = eq_data.get('details', '{}')
+                        if isinstance(details_json, str):
+                            try:
+                                extra_fields = json.loads(details_json)
+                            except:
+                                extra_fields = {}
+                        else:
+                            extra_fields = details_json if details_json else {}
+            
                         with st.form("update_equipment_form"):
-                            name = st.text_input(get_translation('equipment_name'), value=eq_data['name'], key="update_eq_name")
-                            product_name = st.text_input(get_translation('product_name'), value=eq_data.get('product_name', ''), key="update_eq_product_name")
-                            maker = st.text_input(get_translation('maker'), value=eq_data.get('maker', ''), key="update_eq_maker")
-                            model = st.text_input(get_translation('model'), value=eq_data['model'], key="update_eq_model")
-                            serial_number = st.text_input(get_translation('serial_number'), value=eq_data.get('serial_number', ''), key="update_eq_serial_number")
-                            production_date = st.date_input(get_translation('production_date'), value=get_date_value(eq_data.get('production_date', None)), key="update_eq_production_date")
-                            acquisition_cost = st.text_input(get_translation('acquisition_cost'), value=eq_data.get('acquisition_cost', ''), key="update_eq_acquisition_cost")
-                            acquisition_date = st.date_input(get_translation('acquisition_date'), value=get_date_value(eq_data.get('acquisition_date', None)), key="update_eq_acquisition_date")
-                            acquisition_basis = st.text_input(get_translation('acquisition_basis'), value=eq_data.get('acquisition_basis', ''), key="update_eq_acquisition_basis")
-                            purchase_date = st.date_input(get_translation('purchase_date'), value=get_date_value(eq_data.get('purchase_date', None)), key="update_eq_purchase_date")
-                            installation_location = st.text_input(get_translation('installation_location'), value=eq_data.get('installation_location', ''), key="update_eq_installation_location")
-                            min_mold_thickness = st.text_input(get_translation('min_mold_thickness'), value=eq_data.get('min_mold_thickness', ''), key="update_eq_min_mold_thickness")
-                            max_mold_thickness = st.text_input(get_translation('max_mold_thickness'), value=eq_data.get('max_mold_thickness', ''), key="update_eq_max_mold_thickness")
-                            tie_bar_spacing = st.text_input(get_translation('tie_bar_spacing'), value=eq_data.get('tie_bar_spacing', ''), key="update_eq_tie_bar_spacing")
-                            plate_thickness = st.text_input(get_translation('plate_thickness'), value=eq_data.get('plate_thickness', ''), key="update_eq_plate_thickness")
-                            oil_flow_rate = st.text_input(get_translation('oil_flow_rate'), value=eq_data.get('oil_flow_rate', ''), key="update_eq_oil_flow_rate")
-                            max_displacement = st.text_input(get_translation('max_displacement'), value=eq_data.get('max_displacement', ''), key="update_eq_max_displacement")
-                            motor_capacity = st.text_input(get_translation('motor_capacity_specs'), value=eq_data.get('motor_capacity', ''), key="update_eq_motor_capacity")
-                            heater_capacity = st.text_input(get_translation('heater_capacity_specs'), value=eq_data.get('heater_capacity', ''), key="update_eq_heater_capacity")
-                            total_weight = st.text_input(get_translation('total_weight'), value=eq_data.get('total_weight', ''), key="update_eq_total_weight")
-                            status = st.radio(get_translation('status'), [get_translation('normal'), get_translation('faulty')], index=0 if eq_data['status'] == '정상' else 1)
+                            # ========== 공통 필드 ==========
+                            # 첫 번째 행: 설비명, 제품명, 제조사
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                name = st.text_input(get_translation('equipment_name'), value=eq_data['name'], key="update_eq_name")
+                            with col2:
+                                product_name = st.text_input(get_translation('product_name'), value=eq_data.get('product_name', ''), key="update_eq_product_name")
+                            with col3:
+                                maker = st.text_input(get_translation('maker'), value=eq_data.get('maker', ''), key="update_eq_maker")
+                
+                            # 두 번째 행: 모델명, 시리얼번호, 제작일
+                            col4, col5, col6 = st.columns(3)
+                            with col4:
+                                model = st.text_input(get_translation('model'), value=eq_data['model'], key="update_eq_model")
+                            with col5:
+                                serial_number = st.text_input(get_translation('serial_number'), value=eq_data.get('serial_number', ''), key="update_eq_serial_number")
+                            with col6:
+                                production_date = st.date_input(get_translation('production_date'), value=get_date_value(eq_data.get('production_date', None)), key="update_eq_production_date")
+                
+                            # 세 번째 행: 취득가액, 취득일, 취득근거
+                            col7, col8, col9 = st.columns(3)
+                            with col7:
+                                acquisition_cost = st.text_input(get_translation('acquisition_cost'), value=eq_data.get('acquisition_cost', ''), key="update_eq_acquisition_cost")
+                            with col8:
+                                acquisition_date = st.date_input(get_translation('acquisition_date'), value=get_date_value(eq_data.get('acquisition_date', None)), key="update_eq_acquisition_date")
+                            with col9:
+                                acquisition_basis = st.text_input(get_translation('acquisition_basis'), value=eq_data.get('acquisition_basis', ''), key="update_eq_acquisition_basis")
+                
+                            # 네 번째 행: 구입일, 설치장소, 모터용량
+                            col10, col11, col12 = st.columns(3)
+                            with col10:
+                                purchase_date = st.date_input(get_translation('purchase_date'), value=get_date_value(eq_data.get('purchase_date', None)), key="update_eq_purchase_date")
+                            with col11:
+                                installation_location = st.text_input(get_translation('installation_location'), value=eq_data.get('installation_location', ''), key="update_eq_installation_location")
+                            with col12:
+                                motor_capacity = st.text_input(get_translation('motor_capacity_specs'), value=eq_data.get('motor_capacity', ''), key="update_eq_motor_capacity")
+                
+                            # 다섯 번째 행: 히터용량, 총중량, 상태
+                            col13, col14, col15 = st.columns(3)
+                            with col13:
+                                heater_capacity = st.text_input(get_translation('heater_capacity_specs'), value=eq_data.get('heater_capacity', ''), key="update_eq_heater_capacity")
+                            with col14:
+                                total_weight = st.text_input(get_translation('total_weight'), value=eq_data.get('total_weight', ''), key="update_eq_total_weight")
+                            with col15:
+                                status = st.radio(get_translation('status'), [get_translation('normal'), get_translation('faulty')], index=0 if eq_data['status'] == '정상' else 1)
+                
                             st.markdown("---")
+                
+                            # ========== 설비 타입별 특화 필드 ==========
+                            if template:
+                                fields_config = template['fields_config']
+                                specific_fields = fields_config.get('specific_fields', [])
+                    
+                                if specific_fields:
+                                    st.markdown(f"##### {template['display_name']} 전용 사양")
+                        
+                                    specific_fields_data = {}
+                        
+                                    # 3열씩 배치
+                                    for i in range(0, len(specific_fields), 3):
+                                        cols = st.columns(3)
+                                        for j in range(3):
+                                            idx = i + j
+                                            if idx < len(specific_fields):
+                                                field_key = specific_fields[idx]
+                                                field_def = FIELD_DEFINITIONS.get(field_key, {'label': field_key, 'type': 'text'})
+                                    
+                                                with cols[j]:
+                                                    if field_def['type'] == 'text':
+                                                        specific_fields_data[field_key] = st.text_input(
+                                                            field_def['label'],
+                                                            value=extra_fields.get(field_key, ''),
+                                                            key=f"update_spec_{field_key}"
+                                                        )
+                        
+                                    st.markdown("---")
+                
+                            # ========== 부속기기 사양 ==========
                             st.markdown(f"##### {get_translation('accessory_specs')}")
                             if len(st.session_state.edit_accessory_specs) > 0:
                                 st.write(f"**현재 {len(st.session_state.edit_accessory_specs)}개의 부속기기가 등록되어 있습니다.**")
@@ -2031,7 +2436,10 @@ else:
                                     get_translation('col_maker'): '제조처',
                                     get_translation('col_notes'): '비고'
                                 }).to_dict('records')
+                
                             st.markdown("---")
+                
+                            # ========== SPARE PART 사양 ==========
                             st.markdown(f"##### {get_translation('spare_part_specs')}")
                             if len(st.session_state.edit_spare_part_specs) > 0:
                                 st.write(f"**현재 {len(st.session_state.edit_spare_part_specs)}개의 SPARE PART가 등록되어 있습니다.**")
@@ -2057,7 +2465,10 @@ else:
                                     get_translation('col_maintenance_cycle'): '교체 주기',
                                     get_translation('col_replacement_date'): '교체 일자'
                                 }).to_dict('records')
+                
                             st.markdown("---")
+                
+                            # ========== 문서 ==========
                             st.markdown(f"##### {get_translation('documents')}")
                             if len(st.session_state.edit_documents) > 0:
                                 st.write(f"**현재 {len(st.session_state.edit_documents)}개의 문서가 등록되어 있습니다.**")
@@ -2080,53 +2491,55 @@ else:
                                     get_translation('col_hydraulic_drawing'): '유.증압도면',
                                     get_translation('col_lubrication_std'): '윤활 기준표'
                                 }).to_dict('records')
+                
                             st.markdown("---")
-                            st.markdown(f"##### {get_translation('screw_specs')}")
-                            st.markdown("###### 1) 재료 사양 기준")
-                            col_h1, col_h2, col_h3 = st.columns([2, 2, 6])
-                            with col_h1:
-                                st.markdown("**스크류 규격**")
-                            with col_h2:
-                                st.markdown("**해당사항**")
-                            with col_h3:
-                                st.markdown("**재료 사양**")
-                            col_data1, col_data2, col_data3 = st.columns([2, 2, 6])
-                            with col_data1:
-                                st.session_state.edit_screw_specs['screw_type_general'] = st.text_input(
-                                    "일반 수지용 SCREW 규격",
-                                    value=st.session_state.edit_screw_specs.get('screw_type_general', '일반 수지용 SCREW'),
-                                    key="update_screw_spec_general"
-                                )
-                            with col_data2:
-                                st.session_state.edit_screw_specs['applicable_general'] = st.text_input(
-                                    "일반 수지용 SCREW 해당사항",
-                                    value=st.session_state.edit_screw_specs.get('applicable_general', ''),
-                                    key="update_applicable_general"
-                                )
-                            with col_data3:
-                                st.session_state.edit_screw_specs['material_spec_description'] = st.text_area(
-                                    "재료 사양 내용",
-                                    value=st.session_state.edit_screw_specs.get('material_spec_description', ''),
-                                    key="update_material_spec_merged_content",
-                                    height=150
-                                )
-                            col_data4, col_data5, _ = st.columns([2, 2, 6])
-                            with col_data4:
-                                st.session_state.edit_screw_specs['screw_type_wear'] = st.text_input(
-                                    "내마모성 SCREW 규격",
-                                    value=st.session_state.edit_screw_specs.get('screw_type_wear', '내마모성 SCREW'),
-                                    key="update_screw_spec_wear"
-                                )
-                            with col_data5:
-                                st.session_state.edit_screw_specs['applicable_wear'] = st.text_input(
-                                    "내마모성 SCREW 해당사항",
-                                    value=st.session_state.edit_screw_specs.get('applicable_wear', ''),
-                                    key="update_applicable_wear"
-                                )
+                
+                            # ========== 스크류 사양 (사출기만) ==========
+                            if template and fields_config.get('has_screw_specs', False):
+                                st.markdown(f"##### {get_translation('screw_specs')}")
+                                st.markdown("###### 1) 재료 사양 기준")
+                                col_h1, col_h2, col_h3 = st.columns([2, 2, 6])
+                                with col_h1:
+                                    st.markdown("**스크류 규격**")
+                                with col_h2:
+                                    st.markdown("**해당사항**")
+                                with col_h3:
+                                    st.markdown("**재료 사양**")
+                                col_data1, col_data2, col_data3 = st.columns([2, 2, 6])
+                                with col_data1:
+                                    st.session_state.edit_screw_specs['screw_type_general'] = st.text_input(
+                                        "일반 수지용 SCREW 규격",
+                                        value=st.session_state.edit_screw_specs.get('screw_type_general', '일반 수지용 SCREW'),
+                                        key="update_screw_spec_general"
+                                    )
+                                with col_data2:
+                                    st.session_state.edit_screw_specs['applicable_general'] = st.text_input(
+                                        "일반 수지용 SCREW 해당사항",
+                                        value=st.session_state.edit_screw_specs.get('applicable_general', ''),
+                                        key="update_applicable_general"
+                                    )
+                                with col_data3:
+                                    st.session_state.edit_screw_specs['material_spec_description'] = st.text_area(
+                                        "재료 사양 내용",
+                                        value=st.session_state.edit_screw_specs.get('material_spec_description', ''),
+                                        key="update_material_spec_merged_content",
+                                        height=150
+                                    )
+                                col_data4, col_data5, _ = st.columns([2, 2, 6])
+                                with col_data4:
+                                    st.session_state.edit_screw_specs['screw_type_wear'] = st.text_input(
+                                        "내마모성 SCREW 규격",
+                                        value=st.session_state.edit_screw_specs.get('screw_type_wear', '내마모성 SCREW'),
+                                        key="update_screw_spec_wear"
+                                    )
+                                with col_data5:
+                                    st.session_state.edit_screw_specs['applicable_wear'] = st.text_input(
+                                        "내마모성 SCREW 해당사항",
+                                        value=st.session_state.edit_screw_specs.get('applicable_wear', ''),
+                                        key="update_applicable_wear"
+                                    )
 
-                            st.markdown("---")
-                            cols_tables_and_note = st.columns([7, 3])
-                            with cols_tables_and_note[0]:
+                                st.markdown("---")
                                 st.markdown("###### 2) 일반용 SCREW")
                                 st.session_state.edit_screw_specs['general_cycle_df'] = st.data_editor(
                                     pd.DataFrame(st.session_state.edit_screw_specs.get('general_cycle_df', [{'해당 사양': '교체 주기 (월)', 'A': '5', 'B': '5', 'C': '3', 'D': '3'}])),
@@ -2157,60 +2570,44 @@ else:
                                     },
                                     width='stretch'
                                 )
-                            with cols_tables_and_note[1]:
-                                st.markdown("###### 작동유 점도 측정 방법")
-                                note_text = """
-* 작동유 점도 측정 방법
-1. 육안검사
-  각기 다른 용기에 담긴 시료와 새 오일의 색상,투명도,이물질 등을 비교 평가한다
-2. 낙적검사
-  여과지에 시료를 몇방울 떨어뜨려 2-3시간후 관찰하여 얼룩여부 확인 --얼룩 없을시 합격처리함
-"""
-                                st.markdown(note_text)
+                                st.markdown("---")
 
-                            st.markdown("---")
-                            st.markdown(f"##### {get_translation('oil_specs')}")
-                            if len(st.session_state.edit_oil_specs) > 0:
-                                st.write(f"**현재 {len(st.session_state.edit_oil_specs)}개의 작동유 항목이 등록되어 있습니다.**")
-                                oil_df = pd.DataFrame(st.session_state.edit_oil_specs)
-                                edited_oil_df = st.data_editor(
-                                    oil_df.rename(columns={
-                                        '구분': get_translation('col_category'),
-                                        '적용 작동유 SPCE': get_translation('col_applicable_oil'),
-                                        '교체 주기': get_translation('col_maintenance_cycle')
-                                    }),
-                                    num_rows="dynamic",
-                                    width='stretch'
-                                )
-                                st.session_state.edit_oil_specs = edited_oil_df.rename(columns={
-                                    get_translation('col_category'): '구분',
-                                    get_translation('col_applicable_oil'): '적용 작동유 SPCE',
-                                    get_translation('col_maintenance_cycle'): '교체 주기'
-                                }).to_dict('records')
+                            # ========== 작동유 사양 ==========
+                            if template and fields_config.get('has_oil_specs', True):
+                                st.markdown(f"##### {get_translation('oil_specs')}")
+                                if len(st.session_state.edit_oil_specs) > 0:
+                                    st.write(f"**현재 {len(st.session_state.edit_oil_specs)}개의 작동유 항목이 등록되어 있습니다.**")
+                                    oil_df = pd.DataFrame(st.session_state.edit_oil_specs)
+                                    edited_oil_df = st.data_editor(
+                                        oil_df.rename(columns={
+                                            '구분': get_translation('col_category'),
+                                            '적용 작동유 SPCE': get_translation('col_applicable_oil'),
+                                            '교체 주기': get_translation('col_maintenance_cycle')
+                                        }),
+                                        num_rows="dynamic",
+                                        width='stretch'
+                                    )
+                                    st.session_state.edit_oil_specs = edited_oil_df.rename(columns={
+                                        get_translation('col_category'): '구분',
+                                        get_translation('col_applicable_oil'): '적용 작동유 SPCE',
+                                        get_translation('col_maintenance_cycle'): '교체 주기'
+                                    }).to_dict('records')
 
-                            st.session_state.edit_oil_notes = st.text_area("작동유 점도 측정 방법", value=st.session_state.edit_oil_notes, key="update_oil_notes", height=100)
-                            st.markdown("**1년 경과 후 사후관리 방안:**")
-                            st.markdown("*아래에 내용을 작성하세요. 줄바꿈이 자동으로 적용됩니다.*")
-                            st.session_state.edit_oil_aftercare = st.text_area("사후관리 내용", value=st.session_state.edit_oil_aftercare, key="update_oil_aftercare", height=100, label_visibility="collapsed")
+                                st.session_state.edit_oil_notes = st.text_area("작동유 점도 측정 방법", value=st.session_state.edit_oil_notes, key="update_oil_notes", height=100)
+                                st.markdown("**1년 경과 후 사후관리 방안:**")
+                                st.markdown("*아래에 내용을 작성하세요. 줄바꿈이 자동으로 적용됩니다.*")
+                                st.session_state.edit_oil_aftercare = st.text_area("사후관리 내용", value=st.session_state.edit_oil_aftercare, key="update_oil_aftercare", height=100, label_visibility="collapsed")
+                                st.markdown("---")
 
-                            st.markdown("---")
-                            # other_notes를 세션 상태로 관리
+                            # ========== 기타사항 및 이미지 ==========
                             st.session_state.edit_other_notes = st.text_area(get_translation('other_notes'), value=eq_data.get('other_notes', ''), key="update_other_notes")
                             uploaded_images = st.file_uploader(get_translation('upload_image'), type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key="update_eq_images")
 
-                            # 설비 수정 최종 제출 버튼
+                            # ========== 설비 수정 최종 제출 버튼 ==========
                             col1, col2 = st.columns(2)
                             with col1:
                                 if st.form_submit_button(get_translation('update_button'), type="primary"):
-                                    screw_specs_to_update = {
-                                        'material_spec_description': st.session_state.edit_screw_specs.get('material_spec_description', ''),
-                                        'screw_type_general': st.session_state.edit_screw_specs.get('screw_type_general', ''),
-                                        'applicable_general': st.session_state.edit_screw_specs.get('applicable_general', ''),
-                                        'screw_type_wear': st.session_state.edit_screw_specs.get('screw_type_wear', ''),
-                                        'applicable_wear': st.session_state.edit_screw_specs.get('applicable_wear', ''),
-                                        'general_cycle': st.session_state.edit_screw_specs['general_cycle_df'].to_dict('records'),
-                                        'wear_resistant_cycle': st.session_state.edit_screw_specs['wear_resistant_cycle_df'].to_dict('records')
-                                    }
+                                    # details_dict 구성 (공통 필드 + 특화 필드)
                                     details_dict = {
                                         'product_name': product_name,
                                         'maker': maker,
@@ -2223,15 +2620,24 @@ else:
                                         'installation_location': installation_location,
                                         'motor_capacity': motor_capacity,
                                         'heater_capacity': heater_capacity,
-                                        'min_mold_thickness': min_mold_thickness,
-                                        'max_mold_thickness': max_mold_thickness,
-                                        'tie_bar_spacing': tie_bar_spacing,
-                                        'plate_thickness': plate_thickness,
-                                        'oil_flow_rate': oil_flow_rate,
-                                        'max_displacement': max_displacement,
                                         'total_weight': total_weight,
-                                        'other_notes': st.session_state.edit_other_notes  # 세션 상태에서 other_notes 가져오기
+                                        'other_notes': st.session_state.edit_other_notes,
+                                        **specific_fields_data  # 특화 필드 추가
                                     }
+                        
+                                    # 스크류 사양 (있을 경우만)
+                                    screw_specs_to_update = None
+                                    if template and fields_config.get('has_screw_specs', False):
+                                        screw_specs_to_update = {
+                                            'material_spec_description': st.session_state.edit_screw_specs.get('material_spec_description', ''),
+                                            'screw_type_general': st.session_state.edit_screw_specs.get('screw_type_general', ''),
+                                            'applicable_general': st.session_state.edit_screw_specs.get('applicable_general', ''),
+                                            'screw_type_wear': st.session_state.edit_screw_specs.get('screw_type_wear', ''),
+                                            'applicable_wear': st.session_state.edit_screw_specs.get('applicable_wear', ''),
+                                            'general_cycle': st.session_state.edit_screw_specs['general_cycle_df'].to_dict('records'),
+                                            'wear_resistant_cycle': st.session_state.edit_screw_specs['wear_resistant_cycle_df'].to_dict('records')
+                                        }
+                        
                                     success, message = update_equipment(
                                         equipment_id=st.session_state.selected_eq_id_admin,
                                         name=name,
@@ -2250,7 +2656,7 @@ else:
                                         oil_aftercare=st.session_state.edit_oil_aftercare
                                     )
                                     if success:
-                                        st.session_state.edit_other_notes = ''  # 폼 제출 후 edit_other_notes 초기화
+                                        st.session_state.edit_other_notes = ''
                                         st.success("설비 정보가 성공적으로 업데이트되었습니다.")
                                         st.rerun()
                                     else:
@@ -2258,12 +2664,123 @@ else:
                             with col2:
                                 if st.form_submit_button(get_translation('delete_button'), type="primary"):
                                     delete_equipment(st.session_state.selected_eq_id_admin)
-                                    st.session_state.edit_other_notes = ''  # 삭제 후 edit_other_notes 초기화
+                                    st.session_state.edit_other_notes = ''
                                     st.success("설비가 성공적으로 삭제되었습니다.")
                                     st.rerun()
 
-            # 정비 이력 수정/삭제
             with admin_tabs[3]:
+                st.header("⚙️ 설비 템플릿 관리")
+
+                templates = get_equipment_templates()
+
+                # --- 등록된 설비 템플릿 목록 및 삭제 UI ---
+                st.subheader("📋 등록된 설비 템플릿")
+
+                if templates:
+                    for template in templates:
+                        tid = template['id']
+
+                        with st.expander(f"🔧 {template['display_name']} ({template['name']})"):
+                            st.json(template['fields_config'])
+
+                            col1, col2 = st.columns([3, 1])
+                            with col2:
+                                # 1) 최초 삭제 버튼: 누르면 session_state에 플래그 설정
+                                if st.button("삭제", key=f"delete_template_{tid}"):
+                                    st.session_state[f"pending_delete_{tid}"] = True
+
+                                # 2) 플래그가 설정되어 있으면 확인 UI를 노출
+                                if st.session_state.get(f"pending_delete_{tid}", False):
+                                    st.warning(f"템플릿(ID={tid})을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")
+
+                                    c1, c2 = st.columns([1, 1])
+                                    with c1:
+                                        if st.button("✅ 삭제하기", key=f"confirm_delete_{tid}"):
+                                            # 실제 삭제 호출
+                                            success, message = delete_equipment_template(tid)
+
+                                            # 플래그 초기화
+                                            st.session_state[f"pending_delete_{tid}"] = False
+
+                                            if success:
+                                                st.success(message)
+                                                st.rerun()
+                                            else:
+                                                st.error(message)
+
+                                    with c2:
+                                        if st.button("❌ 취소", key=f"cancel_delete_{tid}"):
+                                            st.session_state[f"pending_delete_{tid}"] = False
+                                            st.info("삭제가 취소되었습니다.")
+                else:
+                    st.info("등록된 템플릿이 없습니다.")
+
+                st.markdown("---")
+
+    
+                # 새 템플릿 추가
+                st.subheader("➕ 새 설비 템플릿 추가")
+    
+                with st.form("add_template_form"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        new_template_name = st.text_input(
+                            "템플릿 이름 (영문, 소문자, 언더스코어만)",
+                            placeholder="예: laser_cutting"
+                        )
+                    with col2:
+                        new_template_display = st.text_input(
+                            "표시 이름 (한글)",
+                            placeholder="예: 레이저 커팅기"
+                        )
+        
+                    st.markdown("##### 특화 필드 선택")
+                    st.info("💡 공통 필드(설비명, 모델, 제조사, 모터용량, 히터용량, 총중량 등)는 자동으로 포함됩니다.")
+        
+                    selected_fields = []
+                    cols = st.columns(4)
+                    for idx, (field_key, field_def) in enumerate(FIELD_DEFINITIONS.items()):
+                        with cols[idx % 4]:
+                            if st.checkbox(field_def['label'], key=f"new_field_{field_key}"):
+                                selected_fields.append(field_key)
+        
+                    st.markdown("##### 선택적 섹션")
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        has_accessory = st.checkbox("부속기기 사양", value=True)
+                    with col2:
+                        has_spare_part = st.checkbox("SPARE PART", value=True)
+                    with col3:
+                        has_screw = st.checkbox("스크류 사양", value=False)
+                    with col4:
+                        has_oil = st.checkbox("작동유 사양", value=True)
+        
+                    if st.form_submit_button("템플릿 추가", type="primary"):
+                        if new_template_name and new_template_display:
+                            fields_config = {
+                                'specific_fields': selected_fields,
+                                'has_accessory_specs': has_accessory,
+                                'has_spare_part_specs': has_spare_part,
+                                'has_screw_specs': has_screw,
+                                'has_oil_specs': has_oil
+                            }
+                
+                            success, message = add_equipment_template(
+                                new_template_name,
+                                new_template_display,
+                                fields_config
+                            )
+                
+                            if success:
+                                st.success(message)
+                                st.rerun()
+                            else:
+                                st.error(f"템플릿 추가 실패: {message}")
+                        else:
+                            st.error("템플릿 이름과 표시 이름을 모두 입력해주세요.")
+
+            # 정비 이력 수정/삭제
+            with admin_tabs[4]:
                 st.header(get_translation('update_log_admin'))
                 logs_list = get_maintenance_logs()
                 if not logs_list:
@@ -2292,7 +2809,7 @@ else:
                                         st.rerun()
 
             # 상태 기록 수정/삭제
-            with admin_tabs[4]:
+            with admin_tabs[5]:
                 st.header(get_translation('update_status_admin'))
                 # factory_id를 전달하여 get_status_history 호출
                 status_history = get_status_history(factory_id=factory_id)
