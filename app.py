@@ -130,6 +130,43 @@ def get_status_history(factory_id=None, equipment_id=None):
         st.error(f"Error fetching status history: {e}")
         return []
 
+def get_field_definitions():
+    """모든 활성화된 필드 정의 조회"""
+    try:
+        response = supabase.table('field_definitions').select('*').eq('is_active', True).order('field_label').execute()
+        return response.data if response.data else []
+    except Exception as e:
+        st.error(f"필드 정의 조회 실패: {str(e)}")
+        return []
+
+def add_field_definition(field_key, field_label, field_type, category):
+    """새 필드 정의 추가"""
+    try:
+        # 중복 체크
+        existing = supabase.table('field_definitions').select('id').eq('field_key', field_key).execute()
+        if existing.data:
+            return False, f"'{field_key}' 필드가 이미 존재합니다."
+        
+        data = {
+            'field_key': field_key,
+            'field_label': field_label,
+            'field_type': field_type,
+            'category': category
+        }
+        response = supabase.table('field_definitions').insert(data).execute()
+        return True, "필드가 추가되었습니다."
+    except Exception as e:
+        return False, str(e)
+
+def delete_field_definition(field_id):
+    """필드 정의 삭제 (soft delete)"""
+    try:
+        data = {'is_active': False}
+        response = supabase.table('field_definitions').update(data).eq('id', field_id).execute()
+        return True, "필드가 삭제되었습니다."
+    except Exception as e:
+        return False, str(e)
+
 # ------------------------------------------------------
 # 4. 데이터 관리 (CRUD)
 # ------------------------------------------------------
@@ -218,13 +255,25 @@ def add_equipment(factory_id, name, model, equipment_type, details_dict, accesso
                 screw_specs['wear_resistant_cycle'] = screw_specs['wear_resistant_cycle_df'].to_dict('records')
                 del screw_specs['wear_resistant_cycle_df']
         
+        # fields_config 기본값 설정 (details_dict에 없으면 빈 딕셔너리)
+        fields_config = details_dict.get('fields_config', {})
+        if fields_config is None:
+            fields_config = {}
+        details_dict['fields_config'] = fields_config  # details_dict에 추가
+        
         # equipment 테이블에 실제 컬럼으로 존재하는 필드들
         direct_columns = [
             'product_name', 'maker', 'serial_number', 'production_date',
             'acquisition_cost', 'acquisition_date', 'acquisition_basis',
             'purchase_date', 'installation_location', 'motor_capacity',
-            'heater_capacity', 'total_weight', 'other_notes'
+            'heater_capacity', 'total_weight', 'other_notes',
+            'fields_config'  # fields_config 추가
         ]
+        
+        # field_definitions에서 커스텀 섹션 필드 동적으로 추가
+        all_fields = get_field_definitions()
+        custom_fields = [f['field_key'] for f in all_fields if f['category'] == 'section' and not f['field_key'].startswith('has_')]
+        direct_columns.extend(custom_fields)  # test_2 등 추가
         
         # details_dict를 direct 필드와 extra 필드로 분리
         direct_fields = {}
@@ -242,8 +291,8 @@ def add_equipment(factory_id, name, model, equipment_type, details_dict, accesso
             "model": model,
             "equipment_type": equipment_type,
             "status": '정상',
-            **direct_fields,  # 실제 컬럼에 저장
-            "details": json.dumps(extra_fields, ensure_ascii=False),  # 특화 필드는 JSON으로 저장
+            **direct_fields,  # fields_config, test_2 등 포함
+            "details": json.dumps(extra_fields, ensure_ascii=False),  # 나머지 특화 필드
             "accessory_specs": json.dumps(accessory_specs, ensure_ascii=False),
             "spare_part_specs": json.dumps(spare_part_specs, ensure_ascii=False),
             "documents": json.dumps(documents, ensure_ascii=False),
@@ -436,8 +485,15 @@ def get_date_value(date_str):
 def get_equipment_templates():
     """모든 활성화된 설비 템플릿 조회"""
     try:
-        response = supabase.table('equipment_templates').select('*').eq('is_active', True).order('created_at').execute()  # 정렬 추가
-        return response.data if response.data else []  # None 체크 개선
+        response = supabase.table('equipment_templates').select('*').eq('is_active', True).order('created_at').execute()
+        
+        # fields_config가 JSON 문자열이면 파싱 필요
+        if response.data:
+            for template in response.data:
+                if isinstance(template['fields_config'], str):
+                    template['fields_config'] = json.loads(template['fields_config'])
+        
+        return response.data if response.data else []
     except Exception as e:
         st.error(f"템플릿 조회 실패: {str(e)}")
         return []
@@ -517,26 +573,18 @@ def render_delete_ui(template_id):
             st.info("삭제가 취소되었습니다.")
 
 # 필드 정의 (모든 가능한 필드)
-FIELD_DEFINITIONS = {
-    # 사출기 전용
-    'min_mold_thickness': {'label': '최소금형두께', 'type': 'text'},
-    'max_mold_thickness': {'label': '최대금형두께', 'type': 'text'},
-    'tie_bar_spacing': {'label': '타이바간격', 'type': 'text'},
-    'plate_thickness': {'label': '플레이트두께', 'type': 'text'},
-    'oil_flow_rate': {'label': '오일유량', 'type': 'text'},
-    'max_displacement': {'label': '최대변위', 'type': 'text'},
-    
-    # CNC 전용
-    'spindle_speed': {'label': '스핀들 속도', 'type': 'text'},
-    'table_size': {'label': '테이블 크기', 'type': 'text'},
-    'axis_travel': {'label': '축 이동거리', 'type': 'text'},
-    'tool_capacity': {'label': '공구 용량', 'type': 'text'},
-    
-    # 프레스 전용
-    'press_capacity': {'label': '프레스 용량', 'type': 'text'},
-    'stroke_length': {'label': '스트로크 길이', 'type': 'text'},
-    'bed_size': {'label': '베드 크기', 'type': 'text'},
-}
+@st.cache_data(ttl=300)  # 5분 캐시
+def load_field_definitions():
+    """DB에서 필드 정의를 로드하여 딕셔너리로 반환"""
+    fields = get_field_definitions()
+    field_dict = {}
+    for field in fields:
+        if field['category'] == 'specific':
+            field_dict[field['field_key']] = {
+                'label': field['field_label'],
+                'type': field['field_type']
+            }
+    return field_dict
 
 # ------------------------------------------------------
 # 5. 다국어 지원 딕셔너리
@@ -549,8 +597,11 @@ TRANSLATIONS = {
         'enter_password': '비밀번호',
         'login_button': '로그인',
         'login_success': '로그인 성공',
+        'specific_fields': '전용 사양',
         'login_fail': '비밀번호 오류',
         'current_factory': '현재 공장',
+        'custom_sections': '커스텀 섹션',
+        'no_specific_fields': '전용 사양 정보가 없습니다.',
         'logout': '로그아웃',
         'dashboard': '대시보드',
         'add_equipment': '설비 추가',
@@ -660,6 +711,8 @@ TRANSLATIONS = {
         'col_status': '상태',
         'col_engineer': '엔지니어',
         'col_action': '작업 내용',
+        'no_custom_sections': '커스텀 섹션 설정이 없습니다.',
+        'no_active_custom_sections': '활성화된 커스텀 섹션이 없습니다.',
         'col_image_urls': '첨부 이미지 URL',
         "product_name": "제품 이름",
         "serial_number": "일련번호",
@@ -682,7 +735,8 @@ TRANSLATIONS = {
         'status_updated': '상태가 업데이트되었습니다.',
         'general_screw': '일반용 SCREW',
         'wear_resistant_screw': '내마모성 SCREW',
-        'material_spec_description': '재료 사양'
+        'material_spec_description': '재료 사양',
+        'no_active_sections': '활성화된 섹션이 없습니다.'
     },
     'vi': {
         'title': 'Hệ thống Quản lý Thiết bị Nhà máy',
@@ -698,12 +752,17 @@ TRANSLATIONS = {
         'add_equipment': 'Thêm thiết bị',
         'add_maintenance_log': 'Thêm lịch sử bảo trì',
         'view_maintenance_log': 'Xem lịch sử bảo trì',
+        'custom_sections': 'Phần tùy chỉnh',
+        'specific_fields': 'Thông số chuyên dụng',
         'record_status': 'Ghi lại trạng thái',
         'admin_mode': 'Quản trị viên',
         'no_equipment_registered': 'Chưa có thiết bị nào được đăng ký. Hãy thử thêm một thiết bị mới.',
+        'no_custom_sections': 'Không có cài đặt phần tùy chỉnh.',
+        'no_active_custom_sections': 'Không có phần tùy chỉnh được kích hoạt.',
         'status': 'Trạng thái',
         'normal': 'Bình thường',
         'faulty': 'Hỏng',
+        'no_specific_fields': 'Không có thông tin thông số chuyên dụng.',
         'change_status': 'Thay đổi trạng thái',
         'notes': 'Ghi chú',
         'record_button': 'Ghi lại',
@@ -803,21 +862,22 @@ TRANSLATIONS = {
         'col_engineer': 'Kỹ sư',
         'col_action': 'Nội dung công việc',
         'col_image_urls': 'URL hình ảnh đính kèm',
-        "product_name": "Tên sản phẩm",
-        "serial_number": "Số seri",
-        "production_date": "Ngày sản xuất",
-        "acquisition_cost": "Giá mua lại",
-        "acquisition_date": "Ngày mua lại",
-        "acquisition_basis": "Cơ sở mua lại",
-        "purchase_date": "Ngày mua",
-        "installation_location": "Vị trí lắp đặt",
-        "min_mold_thickness": "Độ dày khuôn tối thiểu",
-        "max_mold_thickness": "Độ dày khuôn tối đa",
-        "tie_bar_spacing": "Khoảng cách thanh giằng",
-        "plate_thickness": "Độ dày tấm",
-        "oil_flow_rate": "Tốc độ dòng dầu",
-        "max_displacement": "Độ dịch chuyển tối đa",
-        "total_weight": "Tổng trọng lượng"
+        'product_name': 'Tên sản phẩm',
+        'serial_number': 'Số seri',
+        'production_date': 'Ngày sản xuất',
+        'acquisition_cost': 'Giá mua lại',
+        'acquisition_date': 'Ngày mua lại',
+        'acquisition_basis': 'Cơ sở mua lại',
+        'purchase_date': 'Ngày mua',
+        'installation_location': 'Vị trí lắp đặt',
+        'min_mold_thickness': 'Độ dày khuôn tối thiểu',
+        'max_mold_thickness': 'Độ dày khuôn tối đa',
+        'tie_bar_spacing': 'Khoảng cách thanh giằng',
+        'plate_thickness': 'Độ dày tấm',
+        'oil_flow_rate': 'Tốc độ dòng dầu',
+        'max_displacement': 'Độ dịch chuyển tối đa',
+        'no_active_sections': 'Không có phần nào được kích hoạt.',
+        'total_weight': "Tổng trọng lượng"
     },
     'th': {
         'title': 'ระบบจัดการอุปกรณ์โรงงาน',
@@ -834,6 +894,7 @@ TRANSLATIONS = {
         'add_maintenance_log': 'เพิ่มประวัติการบำรุงรักษา',
         'view_maintenance_log': 'ดูประวัติการบำรุงรักษา',
         'record_status': 'บันทึกสถานะ',
+        'specific_fields': 'ข้อกำหนดเฉพาะ',
         'admin_mode': 'ผู้ดูแลระบบ',
         'no_equipment_registered': 'ยังไม่มีอุปกรณ์ที่ลงทะเบียน โปรดลองเพิ่มอุปกรณ์ใหม่',
         'capacity_specs': 'ปริมาณและข้อมูลจำเพาะ',
@@ -842,10 +903,14 @@ TRANSLATIONS = {
         'total_weight': 'น้ำหนักรวมเครื่องจักร (ตัน)',
         'add_row_instruction': 'กดปุ่ม '+' ในตารางเพื่อเพิ่มแถว',
         'status': 'สถานะ',
+        'no_specific_fields': 'ไม่มีข้อมูลข้อกำหนดเฉพาะ.',
         'normal': 'ปกติ',
         'faulty': 'ชำรุด',
         'change_status': 'เปลี่ยนสถานะ',
         'notes': 'หมายเหตุ',
+        'custom_sections': 'ส่วนที่กำหนดเอง',
+        'no_custom_sections': 'ไม่มีส่วนที่กำหนดเอง.',
+        'no_active_custom_sections': 'ไม่มีส่วนที่กำหนดเองที่เปิดใช้งาน.',
         'record_button': 'บันทึก',
         'recent_maintenance_logs': 'ประวัติการบำรุงรักษาล่าสุด (สูงสุด 5 รายการ)',
         'no_recent_logs': 'ไม่มีประวัติการบำรุงรักษาล่าสุด',
@@ -942,6 +1007,7 @@ TRANSLATIONS = {
         'col_engineer': 'วิศวกร',
         'col_action': 'รายละเอียดงาน',
         'col_image_urls': 'URL รูปภาพที่แนบ',
+        'no_active_sections': 'ไม่มีส่วนที่เปิดใช้งาน.',
         "product_name": "ชื่อผลิตภัณฑ์",
         "serial_number": "หมายเลขซีเรียล",
         "production_date": "วันที่ผลิต",
@@ -971,8 +1037,12 @@ TRANSLATIONS = {
         'add_equipment': 'Añadir equipo',
         'add_maintenance_log': 'Añadir registro de mantenimiento',
         'view_maintenance_log': 'Ver registro de mantenimiento',
+        'no_custom_sections': 'No hay configuraciones de secciones personalizadas.',
+        'no_active_custom_sections': 'No hay secciones personalizadas activadas.',
         'record_status': 'Registrar estado',
+        'no_specific_fields': 'No hay información de especificaciones dedicadas.',
         'admin_mode': 'Administrador',
+        'custom_sections': 'Secciones personalizadas',
         'no_equipment_registered': 'No hay equipos registrados. Intente añadir uno nuevo.',
         'add_row_instruction': 'Presiona el botón '+' en la tabla para agregar una fila.',
         'capacity_specs': 'Capacidad y especificaciones',
@@ -993,6 +1063,7 @@ TRANSLATIONS = {
         'details': 'Detalles',
         'upload_image': 'Imagen del equipo (se pueden seleccionar varias)',
         'add_equipment_button': 'Añadir equipo',
+        'specific_fields': 'Especificaciones dedicadas',
         'add_success': 'Equipo añadido con éxito',
         'select_equipment': 'Seleccionar equipo para mantenimiento',
         'engineer_name': 'Nombre del ingeniero',
@@ -1080,6 +1151,7 @@ TRANSLATIONS = {
         'col_engineer': 'Ingeniero',
         'col_action': 'Contenido del trabajo',
         'col_image_urls': 'URL de imágenes adjuntas',
+        'no_active_sections': 'No hay secciones activadas.',
         "product_name": "Nombre del producto",
         "serial_number": "Número de serie",
         "production_date": "Fecha de producción",
@@ -1393,17 +1465,18 @@ else:
         get_translation('admin_mode')
     ])
 
-# ------------------------ 대시보드 ------------------------
+
+    # ------------------------ 대시보드 ------------------------
     with tabs[0]:
         st.header(get_translation('dashboard'))
         equipment_search = st.text_input("설비 검색", placeholder="설비 이름, 제조사, 모델, 상태로 검색...", key="dashboard_eq_search")
         equipment_list = get_equipment(factory_id)
         if equipment_search:
             filtered_equipment = [eq for eq in equipment_list if
-                                 equipment_search.lower() in eq['name'].lower() or
-                                 equipment_search.lower() in eq.get('maker', '').lower() or
-                                 equipment_search.lower() in eq.get('model', '').lower() or
-                                 equipment_search.lower() in eq.get('status', '').lower()]
+                                  equipment_search.lower() in eq['name'].lower() or
+                                  equipment_search.lower() in eq.get('maker', '').lower() or
+                                  equipment_search.lower() in eq.get('model', '').lower() or
+                                  equipment_search.lower() in eq.get('status', '').lower()]
         else:
             filtered_equipment = equipment_list
         if not filtered_equipment:
@@ -1416,7 +1489,6 @@ else:
                         expanded=False):
                     col1, col2 = st.columns([1, 2])
                     with col1:
-
                         # 이미지 표시
                         if eq.get('image_urls'):
                             image_urls = eq['image_urls'].split(',') if isinstance(eq['image_urls'], str) else []
@@ -1431,7 +1503,7 @@ else:
                                 st.warning(get_translation('no_valid_image_urls'))
                         else:
                             st.warning(get_translation('no_attachments'))
-                    
+                        
                         # 상태 변경 폼
                         st.subheader(get_translation('record_status'))
                         with st.form(f"status_form_{eq['id']}", clear_on_submit=True):
@@ -1446,7 +1518,7 @@ else:
                     with col2:
                         # 설비 정보 10개씩 2줄로 표시
                         st.subheader(get_translation('equipment_details'))
-                        details = [
+                        details_list = [
                             (get_translation('maker'), eq.get('maker', 'N/A')),
                             (get_translation('model'), eq.get('model', 'N/A')),
                             (get_translation('status'), f":{status_color}-circle: {eq.get('status', 'N/A')}"),
@@ -1468,8 +1540,8 @@ else:
                             (get_translation('max_displacement'), eq.get('max_displacement', 'N/A')),
                             (get_translation('total_weight'), eq.get('total_weight', 'N/A')),
                         ]
-                        first_row = details[:10]
-                        second_row = details[10:]
+                        first_row = details_list[:10]
+                        second_row = details_list[10:]
                         col_row1, col_row2 = st.columns(2)
                         with col_row1:
                             for label, value in first_row:
@@ -1477,132 +1549,139 @@ else:
                         with col_row2:
                             for label, value in second_row:
                                 st.markdown(f"**{label}:** {value}")
-                    
-                        # 부속기기 사양
-                        st.markdown("---")
-                        st.subheader(get_translation('accessory_specs'))
-                        try:
-                            accessory_specs = json.loads(eq.get('accessory_specs', '[]'))
-                            if accessory_specs:
-                                accessory_df = pd.DataFrame(accessory_specs)
-                                st.dataframe(
-                                    accessory_df.rename(columns={
-                                        '부속기기 명': get_translation('col_accessory_name'),
-                                        '형식': get_translation('col_accessory_type'),
-                                        '제작번호': get_translation('col_accessory_serial'),
-                                        '용량 및 규격': get_translation('col_capacity_spec'),
-                                        '제조처': get_translation('col_maker'),
-                                        '비고': get_translation('col_notes')
-                                    }),
-                                    width='stretch'
-                                )
-                            else:
-                                st.info(f"{get_translation('accessory_specs')} 없음")
-                        except:
-                            st.info(f"{get_translation('accessory_specs')} 데이터 로드 오류")
-                    
-                        # SPARE PART 사양
-                        st.markdown("---")
-                        st.subheader(get_translation('spare_part_specs'))
-                        try:
-                            spare_part_specs = json.loads(eq.get('spare_part_specs', '[]'))
-                            if spare_part_specs:
-                                spare_part_df = pd.DataFrame(spare_part_specs)
-                                st.dataframe(
-                                    spare_part_df.rename(columns={
-                                        'SPARE PART': get_translation('col_spare_part'),
-                                        '교체 주기': get_translation('col_maintenance_cycle'),
-                                        '교체 일자': get_translation('col_replacement_date')
-                                    }),
-                                    width='stretch'
-                                )
-                            else:
-                                st.info(f"{get_translation('spare_part_specs')} 없음")
-                        except:
-                            st.info(f"{get_translation('spare_part_specs')} 데이터 로드 오류")
-                    
-                        # 문서
-                        st.markdown("---")
-                        st.subheader(get_translation('documents'))
-                        try:
-                            documents = json.loads(eq.get('documents', '[]'))
-                            if documents:
-                                documents_df = pd.DataFrame(documents)
-                                st.dataframe(
-                                    documents_df.rename(columns={
-                                        '기술 자료명': get_translation('col_doc_name'),
-                                        '취급 설명서': get_translation('col_manual'),
-                                        '전기 도면': get_translation('col_electric_drawing'),
-                                        '유.증압도면': get_translation('col_hydraulic_drawing'),
-                                        '윤활 기준표': get_translation('col_lubrication_std')
-                                    }),
-                                    width='stretch'
-                                )
-                            else:
-                                st.info(f"{get_translation('documents')} 없음")
-                        except:
-                            st.info(f"{get_translation('documents')} 데이터 로드 오류")
-                    
-                        # 재료 사양
-                        st.markdown("---")
-                        st.subheader(get_translation('screw_specs'))
-                        # 설비 추가에서 입력한 재료 사양 정보 표시
-                        if st.session_state.screw_specs.get('material_spec_description'):
-                            # 줄바꿈을 제대로 표시하기 위해 \n을 마크다운 줄바꿈으로 변환
-                            material_spec_formatted = st.session_state.screw_specs['material_spec_description'].replace('\n', '  \n')
-                            st.markdown(material_spec_formatted)
-                        else:
-                            # 기본값 (데이터가 없을 경우)
-                            material_specs = """
-                        A: 일반 수지류(PP, PE, ABS, POM, PMMA, PC, PET)  
-                        B: GLASS WOOL 포함율 30% 이내(PC-GF, POM-GF, PA-GF, PBT-GF)  
-                        C: GLASS WOOL 포함율 30% 이상(난연 ABS, 난연 PC, 난연 PBI, NYLON6,66)  
-                        D: 400℃ 이상 온도 사용 제품
-                        """
-                            st.markdown(material_specs)
 
-                        # 기타사항
+                        # 선택적 섹션 및 전용 사양 추가
                         st.markdown("---")
-                        st.subheader(get_translation('other_notes'))
-
-                        # 기존 하드코딩된 내용 대신 세션 스테이트의 데이터 표시
-                        if st.session_state.get('other_notes'):
-                            st.markdown(st.session_state['other_notes'])  # ← 여전히 필요! 화면에 표시
-                        else:
-                            st.info("기타사항 정보가 없습니다.")
-                    
-                        # 작동유 사양
-                        st.markdown("---")
-                        st.subheader(get_translation('oil_specs'))
+                        st.subheader(get_translation('custom_sections'))
                         try:
-                            oil_specs = json.loads(eq.get('oil_specs', '[]'))
-                            oil_specs_data = [item for item in oil_specs if 'notes' not in item and 'aftercare' not in item]
-    
-                            if oil_specs_data:
-                                oil_df = pd.DataFrame(oil_specs_data)
-                                st.dataframe(
-                                    oil_df.rename(columns={
-                                        '구분': get_translation('col_category'),
-                                        '적용 작동유 SPCE': get_translation('col_applicable_oil'),
-                                        '교체 주기': get_translation('col_maintenance_cycle')
-                                    }),
-                                    width='stretch'
-                                )
+                            # details JSON 로드
+                            raw_details = eq.get('details')
+                            details = raw_details if isinstance(raw_details, dict) else json.loads(raw_details if raw_details else '{}')
+
+                            # fields_config 로드
+                            raw_fields_config = eq.get('fields_config')
+                            if raw_fields_config is None:
+                                fields_config = {}
+                            elif isinstance(raw_fields_config, dict):
+                                fields_config = raw_fields_config
                             else:
-                                st.info(f"{get_translation('oil_specs')} 없음")
-    
-                            oil_notes = next((item['notes'] for item in oil_specs if 'notes' in item), '')
-                            oil_aftercare = next((item['aftercare'] for item in oil_specs if 'aftercare' in item), '')
-    
-                            if oil_notes:
-                                st.markdown(f"**{get_translation('oil_notes')}:** {oil_notes}")
-                            if oil_aftercare:
-                                # 줄바꿈을 제대로 표시하기 위해 \n을 마크다운 줄바꿈으로 변환
-                                oil_aftercare_formatted = oil_aftercare.replace('\n', '  \n')
-                                st.markdown(f"**{get_translation('other_notes')}:**  \n{oil_aftercare_formatted}")
-                        except:
-                            st.info(f"{get_translation('oil_specs')} 데이터 로드 오류")
-                    
+                                fields_config = json.loads(str(raw_fields_config) if raw_fields_config else '{}')
+
+                            default_sections = ['has_accessory_specs', 'has_spare_part_specs', 'has_screw_specs', 'has_oil_specs', 'has_documents']
+                            all_fields = get_field_definitions()
+
+                            # 선택적 섹션 표시 (fields_config 플래그 확인)
+                            displayed_sections = False
+                            for section_key in ['accessory_specs', 'spare_part_specs', 'screw_specs', 'oil_specs', 'documents']:
+                                has_section = fields_config.get(f'has_{section_key}', False)
+                                if has_section:
+                                    displayed_sections = True
+                                    section_label = next((f['field_label'] for f in all_fields if f['field_key'] == section_key), section_key)
+                                    with st.expander(section_label, expanded=False):
+                                        section_data = eq.get(section_key, []) or details.get(section_key, [])
+                                        if section_data:
+                                            if isinstance(section_data, list):
+                                                df = pd.DataFrame(section_data)
+                                                if section_key == 'accessory_specs':
+                                                    df = df.rename(columns={
+                                                        '부속기기 명': get_translation('col_accessory_name'),
+                                                        '형식': get_translation('col_accessory_type'),
+                                                        '제작번호': get_translation('col_accessory_serial'),
+                                                        '용량 및 규격': get_translation('col_capacity_spec'),
+                                                        '제조처': get_translation('col_maker'),
+                                                        '비고': get_translation('col_notes')
+                                                    })
+                                                elif section_key == 'spare_part_specs':
+                                                    df = df.rename(columns={
+                                                        'SPARE PART': get_translation('col_spare_part'),
+                                                        '교체 주기': get_translation('col_maintenance_cycle'),
+                                                        '교체 일자': get_translation('col_replacement_date')
+                                                    })
+                                                elif section_key == 'documents':
+                                                    df = df.rename(columns={
+                                                        '기술 자료명': get_translation('col_doc_name'),
+                                                        '취급 설명서': get_translation('col_manual'),
+                                                        '전기 도면': get_translation('col_electric_drawing'),
+                                                        '유.증압도면': get_translation('col_hydraulic_drawing'),
+                                                        '윤활 기준표': get_translation('col_lubrication_std')
+                                                    })
+                                                elif section_key == 'oil_specs':
+                                                    df = pd.DataFrame([item for item in section_data if 'notes' not in item and 'aftercare' not in item])
+                                                    df = df.rename(columns={
+                                                        '구분': get_translation('col_category'),
+                                                        '적용 작동유 SPCE': get_translation('col_applicable_oil'),
+                                                        '교체 주기': get_translation('col_maintenance_cycle')
+                                                    })
+                                                st.dataframe(df, use_container_width=True)
+                                            else:
+                                                st.markdown(str(section_data).replace('\n', '  \n'))
+                                        else:
+                                            st.info(f"{section_label} 정보가 없습니다.")
+                                        # oil_specs의 notes와 aftercare 처리
+                                        if section_key == 'oil_specs':
+                                            oil_notes = next((item['notes'] for item in section_data if 'notes' in item), '')
+                                            oil_aftercare = next((item['aftercare'] for item in section_data if 'aftercare' in item), '')
+                                            if oil_notes:
+                                                st.markdown(f"**{get_translation('oil_notes')}:** {oil_notes}")
+                                            if oil_aftercare:
+                                                oil_aftercare_formatted = oil_aftercare.replace('\n', '  \n')
+                                                st.markdown(f"**{get_translation('other_notes')}:**  \n{oil_aftercare_formatted}")
+
+                            # 기타사항 표시
+                            has_other_notes = fields_config.get('has_other_notes', False)
+                            if has_other_notes:
+                                displayed_sections = True
+                                with st.expander(get_translation('other_notes'), expanded=False):
+                                    other_notes = eq.get('other_notes', '') or details.get('other_notes', '')
+                                    if other_notes and other_notes.strip():
+                                        st.markdown(other_notes.replace('\n', '  \n'))
+                                    else:
+                                        st.info(f"{get_translation('other_notes')} 정보가 없습니다.")
+
+                            # 전용 사양 (specific_fields) 표시
+                            specific_field_keys = fields_config.get('specific_fields', [])
+                            specific_fields = [f for f in all_fields if f['category'] == 'specific' and f['is_active'] and f['field_key'] in specific_field_keys]
+                            if specific_fields:
+                                displayed_sections = True
+                                st.markdown(f"##### {get_translation('specific_fields')}")
+                                for field in specific_fields:
+                                    field_key = field['field_key']
+                                    field_label = field['field_label']
+                                    field_value = details.get(field_key, '') or eq.get(field_key, '')
+                                    if field_value and field_value.strip():
+                                        with st.expander(f"{field_label}", expanded=False):
+                                            field_value_formatted = field_value.replace('\n', '  \n')
+                                            st.markdown(field_value_formatted)
+
+                            # 커스텀 섹션 표시 (fields_config이 있을 때만 동작)
+                            if fields_config:
+                                for config_key, config_value in fields_config.items():
+                                    if config_key.startswith('has_') and config_value == True and config_key not in default_sections and config_key != 'has_other_notes':
+                                        displayed_sections = True
+                                        section_key = config_key.replace('has_', '')
+                                        try:
+                                            field_def = next((f for f in all_fields if f['field_key'] == section_key), None)
+                                            if field_def:
+                                                field_label = field_def['field_label']
+                                                with st.expander(f"{field_label}", expanded=False):
+                                                    custom_value = eq.get(section_key, '') or details.get(section_key, '')
+                                                    if custom_value and custom_value.strip():
+                                                        custom_value_formatted = custom_value.replace('\n', '  \n')
+                                                        st.markdown(custom_value_formatted)
+                                                    else:
+                                                        st.info(f"{field_label} 정보가 없습니다.")
+                                            else:
+                                                st.warning(f"커스텀 섹션 '{section_key}'의 정의를 찾을 수 없습니다.")
+                                        except Exception as e:
+                                            st.error(f"커스텀 섹션 처리 중 오류: {str(e)}")
+                            else:
+                                # fields_config이 없으면 커스텀 섹션 없음 메시지 (선택적 UX 개선)
+                                if not displayed_sections:
+                                    st.info(get_translation('no_active_sections'))
+
+                        except Exception as e:
+                            st.error(f"설비 정보 표시 중 오류: {str(e)}")
+
                         # 최근 정비 이력
                         st.markdown("---")
                         st.subheader(get_translation('recent_maintenance_logs'))
@@ -1625,7 +1704,7 @@ else:
                             )
                         else:
                             st.info(get_translation('no_recent_logs'))
-                    
+
                         # 최근 상태 이력
                         st.markdown("---")
                         st.subheader(get_translation('recent_status_history'))
@@ -1717,13 +1796,9 @@ else:
             
                 # ========== 설비 타입별 특화 필드 (동적으로 표시) ==========
                 specific_fields = fields_config.get('specific_fields', [])
-            
                 if specific_fields:
                     st.markdown(f"##### {selected_template_name} 전용 사양")
-                
                     specific_fields_data = {}
-                
-                    # 3열씩 배치
                     for i in range(0, len(specific_fields), 3):
                         cols = st.columns(3)
                         for j in range(3):
@@ -1731,14 +1806,10 @@ else:
                             if idx < len(specific_fields):
                                 field_key = specific_fields[idx]
                                 field_def = FIELD_DEFINITIONS.get(field_key, {'label': field_key, 'type': 'text'})
-                            
                                 with cols[j]:
-                                    if field_def['type'] == 'text':
-                                        specific_fields_data[field_key] = st.text_input(
-                                            field_def['label'],
-                                            key=f"add_spec_{field_key}"
-                                        )
-                
+                                    value = st.text_input(field_def['label'], key=f"add_spec_{field_key}")
+                                    if value.strip():  # 빈 값 제외
+                                        specific_fields_data[field_key] = value
                     st.markdown("---")
 
                 # ========== 조건부 섹션들 ==========
@@ -1774,7 +1845,6 @@ else:
                             get_translation('col_maker'): '제조처',
                             get_translation('col_notes'): '비고'
                         }).to_dict('records')
-                        # 순번 자동 업데이트
                         for idx, spec in enumerate(st.session_state.accessory_specs):
                             spec['순번'] = idx + 1
                         if st.session_state.accessory_specs:
@@ -1964,6 +2034,40 @@ else:
                             st.markdown(note_text)
                     st.markdown("---")
 
+                # ========== 동적으로 추가된 커스텀 섹션들 ==========
+                # 기본 섹션 목록
+                default_sections = ['has_accessory_specs', 'has_spare_part_specs', 'has_screw_specs', 'has_oil_specs']
+
+                # 커스텀 섹션 초기화
+                if 'custom_sections' not in st.session_state:
+                    st.session_state.custom_sections = {}
+
+                # fields_config에서 커스텀 섹션 찾기
+                for config_key, config_value in fields_config.items():
+                    if config_key.startswith('has_') and config_value == True and config_key not in default_sections:
+                        section_key = config_key.replace('has_', '')  # 먼저 section_key 계산
+        
+                        # field_definitions에서 라벨 찾기 (prefix 제거 후 매칭)
+                        all_fields = get_field_definitions()
+                        field_def = next((f for f in all_fields if f['field_key'] == section_key), None)
+        
+                        if field_def:
+                            field_label = field_def['field_label']
+            
+                            with st.expander(f"{field_label}", expanded=False):
+                                custom_section_value = st.text_area(
+                                    f"{field_label} 내용 입력",
+                                    value=st.session_state.custom_sections.get(section_key, ''),
+                                    key=f"add_custom_section_{section_key}",
+                                    height=150,
+                                    help=f"{field_label}에 대한 정보를 입력하세요"
+                                )
+                                st.session_state.custom_sections[section_key] = custom_section_value
+                            st.markdown("---")
+                        else:
+                            # 필드 정의가 없을 때 경고 (옵션: 사용자에게 피드백)
+                            st.warning(f"커스텀 섹션 '{section_key}'의 정의를 찾을 수 없습니다. 관리자에서 확인하세요.")
+
                 # 기타사항 및 이미지 업로드
                 st.session_state.other_notes = st.text_area(get_translation('other_notes'), value=st.session_state.get('other_notes', ''), key="add_other_notes")
                 uploaded_images = st.file_uploader(get_translation('upload_image'), type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key="add_eq_images")
@@ -1978,7 +2082,7 @@ else:
                     image_urls_str = upload_images(uploaded_images) if uploaded_images else ""
                 
                     if factory_id and name and model:
-                        # details_dict 구성 (공통 필드 + 특화 필드)
+                        # details_dict 구성 (공통 필드 + 특화 필드 + 커스텀 섹션)
                         details_dict = {
                             'product_name': product_name,
                             'maker': maker,
@@ -1993,7 +2097,9 @@ else:
                             'heater_capacity': heater_capacity,
                             'total_weight': total_weight,
                             'other_notes': st.session_state.other_notes,
-                            **specific_fields_data  # 특화 필드 추가
+                            'fields_config': fields_config,  # fields_config 추가
+                            **specific_fields_data,  # 특화 필드
+                            **st.session_state.custom_sections  # 커스텀 섹션
                         }
                     
                         # 스크류 사양 (있을 경우만)
@@ -2021,7 +2127,7 @@ else:
                             factory_id=factory_id,
                             name=name,
                             model=model,
-                            equipment_type=selected_template['name'],  # 템플릿 이름 저장
+                            equipment_type=selected_template['name'],
                             details_dict=details_dict,
                             accessory_specs=st.session_state.accessory_specs if fields_config.get('has_accessory_specs', True) else [],
                             spare_part_specs=st.session_state.spare_part_specs if fields_config.get('has_spare_part_specs', True) else [],
@@ -2035,6 +2141,7 @@ else:
                             reset_add_equipment_form_state()
                             st.session_state.other_notes = ''
                             st.session_state.oil_aftercare = ''
+                            st.session_state.custom_sections = {}  # 커스텀 섹션 초기화
                             st.success("설비가 성공적으로 추가되었습니다.")
                             st.rerun()
                         else:
@@ -2668,145 +2775,236 @@ else:
                                     st.success("설비가 성공적으로 삭제되었습니다.")
                                     st.rerun()
 
+            # 설비 템플릿 관리 탭
             with admin_tabs[3]:
                 st.header("⚙️ 설비 템플릿 관리")
-
-                templates = get_equipment_templates()
-
-                # --- 등록된 설비 템플릿 목록 및 삭제 UI ---
-                st.subheader("📋 등록된 설비 템플릿")
-
-                if templates:
-                    for template in templates:
-                        tid = template['id']
-
-                        with st.expander(f"🔧 {template['display_name']} ({template['name']})"):
-                            st.json(template['fields_config'])
-
-                            col1, col2 = st.columns([3, 1])
-                            with col2:
-                                # 1) 최초 삭제 버튼: 누르면 session_state에 플래그 설정
-                                if st.button("삭제", key=f"delete_template_{tid}"):
-                                    st.session_state[f"pending_delete_{tid}"] = True
-
-                                # 2) 플래그가 설정되어 있으면 확인 UI를 노출
-                                if st.session_state.get(f"pending_delete_{tid}", False):
-                                    st.warning(f"템플릿(ID={tid})을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")
-
-                                    c1, c2 = st.columns([1, 1])
-                                    with c1:
-                                        if st.button("✅ 삭제하기", key=f"confirm_delete_{tid}"):
-                                            # 실제 삭제 호출
-                                            success, message = delete_equipment_template(tid)
-
-                                            # 플래그 초기화
-                                            st.session_state[f"pending_delete_{tid}"] = False
-
-                                            if success:
-                                                st.success(message)
-                                                st.rerun()
-                                            else:
-                                                st.error(message)
-
-                                    with c2:
-                                        if st.button("❌ 취소", key=f"cancel_delete_{tid}"):
-                                            st.session_state[f"pending_delete_{tid}"] = False
-                                            st.info("삭제가 취소되었습니다.")
-                else:
-                    st.info("등록된 템플릿이 없습니다.")
-
-                st.markdown("---")
-
     
-                # 새 템플릿 추가
-                st.subheader("➕ 새 설비 템플릿 추가")
+                # 서브 탭 추가: 템플릿 관리 / 필드 관리
+                template_subtabs = st.tabs(["📝 템플릿 관리", "🔧 필드 관리"])
     
-                with st.form("add_template_form"):
+                # === 템플릿 관리 탭 ===
+                with template_subtabs[0]:
+                    templates = get_equipment_templates()
+        
+                    st.subheader("📋 등록된 설비 템플릿")
+                    if templates:
+                        for template in templates:
+                            tid = template['id']
+                            with st.expander(f"🔧 {template['display_name']} ({template['name']})"):
+                                st.json(template['fields_config'])
+                    
+                                col1, col2 = st.columns([3, 1])
+                                with col2:
+                                    if st.button("삭제", key=f"delete_template_{tid}"):
+                                        st.session_state[f"pending_delete_{tid}"] = True
+                        
+                                    if st.session_state.get(f"pending_delete_{tid}", False):
+                                        st.warning(f"템플릿을 삭제하시겠습니까?")
+                                        c1, c2 = st.columns([1, 1])
+                                        with c1:
+                                            if st.button("✅ 삭제", key=f"confirm_delete_{tid}"):
+                                                success, message = delete_equipment_template(tid)
+                                                st.session_state[f"pending_delete_{tid}"] = False
+                                                if success:
+                                                    st.success(message)
+                                                    st.rerun()
+                                                else:
+                                                    st.error(message)
+                                        with c2:
+                                            if st.button("❌ 취소", key=f"cancel_delete_{tid}"):
+                                                st.session_state[f"pending_delete_{tid}"] = False
+        
+                    st.markdown("---")
+        
+                    # 새 템플릿 추가 (동적 필드 사용)
+                    st.subheader("➕ 새 설비 템플릿 추가")
+        
+                    with st.form("add_template_form"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            new_template_name = st.text_input(
+                                "템플릿 이름 (영문, 소문자, 언더스코어만)",
+                                placeholder="예: laser_cutting"
+                            )
+                        with col2:
+                            new_template_display = st.text_input(
+                                "표시 이름 (한글)",
+                                placeholder="예: 레이저 커팅기"
+                            )
+            
+                        st.markdown("##### 특화 필드 선택")
+                        st.info("💡 공통 필드는 자동으로 포함됩니다.")
+            
+                        # DB에서 동적으로 필드 로드
+                        all_fields = get_field_definitions()
+                        specific_fields = [f for f in all_fields if f['category'] == 'specific']
+                        section_fields = [f for f in all_fields if f['category'] == 'section']
+            
+                        selected_fields = []
+                        cols = st.columns(4)
+                        for idx, field in enumerate(specific_fields):
+                            with cols[idx % 4]:
+                                if st.checkbox(field['field_label'], key=f"new_field_{field['field_key']}"):
+                                    selected_fields.append(field['field_key'])
+            
+                        st.markdown("##### 선택적 섹션")
+                        section_selections = {}
+                        cols = st.columns(4)
+                        for idx, section in enumerate(section_fields):
+                            with cols[idx % 4]:
+                                # 기본값 설정
+                                default_value = section['field_key'] not in ['screw_specs']  # screw만 false
+        
+                                # has_ 접두사가 없으면 추가
+                                config_key = section['field_key']
+                                if not config_key.startswith('has_'):
+                                    config_key = f"has_{config_key}"
+        
+                                section_selections[config_key] = st.checkbox(
+                                    section['field_label'],
+                                    value=default_value,
+                                    key=f"new_section_{section['field_key']}"
+                                )
+
+                        if st.form_submit_button("템플릿 추가", type="primary"):
+                            if new_template_name and new_template_display:
+                                fields_config = {
+                                    'specific_fields': selected_fields,
+                                    **section_selections  # 이미 has_ 접두사 포함됨
+                                }
+                    
+                                success, message = add_equipment_template(
+                                    new_template_name,
+                                    new_template_display,
+                                    fields_config
+                                )
+                    
+                                if success:
+                                    st.success(message)
+                                    st.cache_data.clear()  # 캐시 초기화
+                                    st.rerun()
+                                else:
+                                    st.error(f"템플릿 추가 실패: {message}")
+                            else:
+                                st.error("템플릿 이름과 표시 이름을 모두 입력해주세요.")
+    
+                # === 필드 관리 탭 ===
+                with template_subtabs[1]:
+                    st.subheader("🔧 필드 정의 관리")
+        
+                    all_fields = get_field_definitions()
+        
+                    # 기존 필드 목록
+                    st.markdown("##### 📋 등록된 필드")
+        
                     col1, col2 = st.columns(2)
                     with col1:
-                        new_template_name = st.text_input(
-                            "템플릿 이름 (영문, 소문자, 언더스코어만)",
-                            placeholder="예: laser_cutting"
-                        )
+                        st.markdown("**특화 필드**")
+                        specific = [f for f in all_fields if f['category'] == 'specific']
+                        for field in specific:
+                            cols = st.columns([3, 1])
+                            with cols[0]:
+                                st.text(f"{field['field_label']} ({field['field_key']})")
+                            with cols[1]:
+                                if st.button("🗑️", key=f"del_field_{field['id']}"):
+                                    success, msg = delete_field_definition(field['id'])
+                                    if success:
+                                        st.success(msg)
+                                        st.cache_data.clear()
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+        
                     with col2:
-                        new_template_display = st.text_input(
-                            "표시 이름 (한글)",
-                            placeholder="예: 레이저 커팅기"
-                        )
+                        st.markdown("**선택적 섹션**")
+                        sections = [f for f in all_fields if f['category'] == 'section']
+                        for field in sections:
+                            cols = st.columns([3, 1])
+                            with cols[0]:
+                                st.text(f"{field['field_label']} ({field['field_key']})")
+                            with cols[1]:
+                                if st.button("🗑️", key=f"del_section_{field['id']}"):
+                                    success, msg = delete_field_definition(field['id'])
+                                    if success:
+                                        st.success(msg)
+                                        st.cache_data.clear()
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
         
-                    st.markdown("##### 특화 필드 선택")
-                    st.info("💡 공통 필드(설비명, 모델, 제조사, 모터용량, 히터용량, 총중량 등)는 자동으로 포함됩니다.")
+                    st.markdown("---")
         
-                    selected_fields = []
-                    cols = st.columns(4)
-                    for idx, (field_key, field_def) in enumerate(FIELD_DEFINITIONS.items()):
-                        with cols[idx % 4]:
-                            if st.checkbox(field_def['label'], key=f"new_field_{field_key}"):
-                                selected_fields.append(field_key)
+                    # 새 필드 추가
+                    st.markdown("##### ➕ 새 필드 추가")
         
-                    st.markdown("##### 선택적 섹션")
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        has_accessory = st.checkbox("부속기기 사양", value=True)
-                    with col2:
-                        has_spare_part = st.checkbox("SPARE PART", value=True)
-                    with col3:
-                        has_screw = st.checkbox("스크류 사양", value=False)
-                    with col4:
-                        has_oil = st.checkbox("작동유 사양", value=True)
-        
-                    if st.form_submit_button("템플릿 추가", type="primary"):
-                        if new_template_name and new_template_display:
-                            fields_config = {
-                                'specific_fields': selected_fields,
-                                'has_accessory_specs': has_accessory,
-                                'has_spare_part_specs': has_spare_part,
-                                'has_screw_specs': has_screw,
-                                'has_oil_specs': has_oil
-                            }
-                
-                            success, message = add_equipment_template(
-                                new_template_name,
-                                new_template_display,
-                                fields_config
+                    with st.form("add_field_form"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            new_field_key = st.text_input(
+                                "필드 키 (영문, 소문자, 언더스코어만)",
+                                placeholder="예: laser_power"
                             )
-                
-                            if success:
-                                st.success(message)
-                                st.rerun()
+                            new_field_label = st.text_input(
+                                "필드 표시명 (한글)",
+                                placeholder="예: 레이저 출력"
+                            )
+                        with col2:
+                            new_field_type = st.selectbox(
+                                "필드 타입",
+                                options=['text', 'number', 'date'],
+                                index=0
+                            )
+                            new_field_category = st.selectbox(
+                                "카테고리",
+                                options=['specific', 'section'],
+                                format_func=lambda x: '특화 필드' if x == 'specific' else '선택적 섹션'
+                            )
+            
+                        if st.form_submit_button("필드 추가", type="primary"):
+                            if new_field_key and new_field_label:
+                                success, message = add_field_definition(
+                                    new_field_key,
+                                    new_field_label,
+                                    new_field_type,
+                                    new_field_category
+                                )
+                    
+                                if success:
+                                    st.success(message)
+                                    st.cache_data.clear()  # 캐시 초기화
+                                    st.rerun()
+                                else:
+                                    st.error(f"필드 추가 실패: {message}")
                             else:
-                                st.error(f"템플릿 추가 실패: {message}")
-                        else:
-                            st.error("템플릿 이름과 표시 이름을 모두 입력해주세요.")
+                                st.error("필드 키와 표시명을 모두 입력해주세요.")
+                        # 정비 이력 수정/삭제
+                        with admin_tabs[4]:
+                            st.header(get_translation('update_log_admin'))
+                            logs_list = get_maintenance_logs()
+                            if not logs_list:
+                                st.warning("정비 이력이 없습니다.")
+                            else:
+                                log_options = {f"ID: {log['id']} | 날짜: {log['maintenance_date']} | 작업: {log['action']}": log['id'] for log in logs_list}
+                                selected_log_id_admin = st.selectbox(get_translation('select_log_admin'), options=list(log_options.keys()), key='admin_log_select')
+                                selected_log_id = log_options.get(selected_log_id_admin, None)
 
-            # 정비 이력 수정/삭제
-            with admin_tabs[4]:
-                st.header(get_translation('update_log_admin'))
-                logs_list = get_maintenance_logs()
-                if not logs_list:
-                    st.warning("정비 이력이 없습니다.")
-                else:
-                    log_options = {f"ID: {log['id']} | 날짜: {log['maintenance_date']} | 작업: {log['action']}": log['id'] for log in logs_list}
-                    selected_log_id_admin = st.selectbox(get_translation('select_log_admin'), options=list(log_options.keys()), key='admin_log_select')
-                    selected_log_id = log_options.get(selected_log_id_admin, None)
-
-                    if selected_log_id:
-                        log_data = next((log for log in logs_list if log['id'] == selected_log_id), None)
-                        if log_data:
-                            with st.form("update_log_form"):
-                                engineer = st.text_input(get_translation('col_engineer'), value=log_data['engineer'])
-                                action = st.text_input(get_translation('col_action'), value=log_data['action'])
-                                notes = st.text_area(get_translation('col_notes'), value=log_data['notes'])
-                                uploaded_images = st.file_uploader(get_translation('upload_image'), type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    if st.form_submit_button(get_translation('update_button')):
-                                        update_log(selected_log_id, engineer, action, notes, uploaded_images)
-                                        st.rerun()
-                                with col2:
-                                    if st.form_submit_button(get_translation('delete_button')):
-                                        delete_log(selected_log_id)
-                                        st.rerun()
+                                if selected_log_id:
+                                    log_data = next((log for log in logs_list if log['id'] == selected_log_id), None)
+                                    if log_data:
+                                        with st.form("update_log_form"):
+                                            engineer = st.text_input(get_translation('col_engineer'), value=log_data['engineer'])
+                                            action = st.text_input(get_translation('col_action'), value=log_data['action'])
+                                            notes = st.text_area(get_translation('col_notes'), value=log_data['notes'])
+                                            uploaded_images = st.file_uploader(get_translation('upload_image'), type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
+                                            col1, col2 = st.columns(2)
+                                            with col1:
+                                                if st.form_submit_button(get_translation('update_button')):
+                                                    update_log(selected_log_id, engineer, action, notes, uploaded_images)
+                                                    st.rerun()
+                                            with col2:
+                                                if st.form_submit_button(get_translation('delete_button')):
+                                                    delete_log(selected_log_id)
+                                                    st.rerun()
 
             # 상태 기록 수정/삭제
             with admin_tabs[5]:
