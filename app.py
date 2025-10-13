@@ -28,12 +28,12 @@ supabase: Client = init_connection()
 # 필드 정의 (특화 필드만 - 공통 필드는 제외)
 FIELD_DEFINITIONS = {
     # 사출기 전용
-    'min_mold_thickness': {'label': '최소금형두께', 'type': 'text'},
-    'max_mold_thickness': {'label': '최대금형두께', 'type': 'text'},
-    'tie_bar_spacing': {'label': '타이바간격', 'type': 'text'},
-    'plate_thickness': {'label': '플레이트두께', 'type': 'text'},
-    'oil_flow_rate': {'label': '오일유량', 'type': 'text'},
-    'max_displacement': {'label': '최대변위', 'type': 'text'},
+    'min_mold_thickness': {'label': 'min_mold_thickness', 'type': 'text'},
+    'max_mold_thickness': {'label': 'max_mold_thickness', 'type': 'text'},
+    'tie_bar_spacing': {'label': 'tie_bar_spacing', 'type': 'text'},
+    'plate_thickness': {'label': 'plate_thickness', 'type': 'text'},
+    'oil_flow_rate': {'label': 'oil_flow_rate', 'type': 'text'},
+    'max_displacement': {'label': 'max_displacement', 'type': 'text'},
     
     # CNC 전용
     'spindle_speed': {'label': '스핀들 속도', 'type': 'text'},
@@ -1557,7 +1557,7 @@ else:
                                 f"<b>{get_translation('equipment_age')}:</b> {get_translation('not_available')}",
                                 unsafe_allow_html=True
                             )
-
+    
                         try:
                             # details JSON 로드
                             raw_details = eq.get('details')
@@ -1575,33 +1575,62 @@ else:
                             all_fields = get_field_definitions()
                             
                             # === 1. 기본 정보 (2열 레이아웃) ===
-                            details_list = [
-                                (get_translation('maker'), eq.get('maker', 'N/A')),
-                                (get_translation('model'), eq.get('model', 'N/A')),
-                                (get_translation('status'), f":{status_color}-circle: {eq.get('status', 'N/A')}"),
-                                (get_translation('product_name'), eq.get('product_name', 'N/A')),
-                                (get_translation('serial_number'), eq.get('serial_number', 'N/A')),
-                                (get_translation('production_date'), eq.get('production_date', 'N/A')),
-                                (get_translation('acquisition_cost'), eq.get('acquisition_cost', 'N/A')),
-                                (get_translation('acquisition_date'), eq.get('acquisition_date', 'N/A')),
-                                (get_translation('acquisition_basis'), eq.get('acquisition_basis', 'N/A')),
-                                (get_translation('purchase_date'), eq.get('purchase_date', 'N/A')),
-                                (get_translation('installation_location'), eq.get('installation_location', 'N/A')),
-                                (get_translation('motor_capacity_specs'), eq.get('motor_capacity', 'N/A')),
-                                (get_translation('heater_capacity_specs'), eq.get('heater_capacity', 'N/A')),
-                                (get_translation('total_weight'), eq.get('total_weight', 'N/A')),
-                            ]
-                            
+                            with st.container():
+                                details_list = [
+                                    (get_translation('maker'), eq.get('maker', 'N/A')),
+                                    (get_translation('model'), eq.get('model', 'N/A')),
+                                    (get_translation('status'), eq.get('status', 'N/A')),
+                                    (get_translation('product_name'), eq.get('product_name', 'N/A')),
+                                    (get_translation('serial_number'), eq.get('serial_number', 'N/A')),
+                                    (get_translation('production_date'), eq.get('production_date', 'N/A')),
+                                    (get_translation('acquisition_cost'), eq.get('acquisition_cost', 'N/A')),
+                                    (get_translation('acquisition_date'), eq.get('acquisition_date', 'N/A')),
+                                    (get_translation('acquisition_basis'), eq.get('acquisition_basis', 'N/A')),
+                                    (get_translation('purchase_date'), eq.get('purchase_date', 'N/A')),
+                                    (get_translation('installation_location'), eq.get('installation_location', 'N/A')),
+                                    (get_translation('motor_capacity_specs'), eq.get('motor_capacity', 'N/A')),
+                                    (get_translation('heater_capacity_specs'), eq.get('heater_capacity', 'N/A')),
+                                    (get_translation('total_weight'), eq.get('total_weight', 'N/A')),
+                                ]
+
+                                cols = st.columns(2)
+                                for i, (label, value) in enumerate(details_list):
+                                    with cols[i % 2]:
+                                        st.write(f"**{label}:** {value}")
+
                             # === 2. 특화 필드 추가 (equipment 테이블에서 직접 가져오기) ===
-                            specific_field_keys = fields_config.get('specific_fields', [])
-                            for field_key in specific_field_keys:
-                                field_def = FIELD_DEFINITIONS.get(field_key, {'label': field_key, 'type': 'text'})
-                                field_value = eq.get(field_key, '') or details.get(field_key, '')
-                                if field_value and str(field_value).strip() and str(field_value) != 'N/A':
-                                    details_list.append((field_def['label'], field_value))
-                            
-                            # === 3. 커스텀 섹션 필드 추가 (텍스트 형태) ===
+                            with st.container():
+                                specific_field_keys = fields_config.get('specific_fields', [])
+                                if specific_field_keys:
+                                    st.subheader(get_translation('specific_fields'))
+                                    specific_details = []
+                                    for field_key in specific_field_keys:
+                                        field_def = FIELD_DEFINITIONS.get(field_key, {'label': field_key, 'type': 'text'})
+                                        field_value = eq.get(field_key, '') or details.get(field_key, '')
+                                        if field_value and str(field_value).strip() and str(field_value) != 'N/A':
+                                            translated_label = get_translation(field_def['label'])
+                                            specific_details.append((translated_label, field_value))
+
+                                    if specific_details:
+                                        # 2열 레이아웃으로 표시
+                                        cols = st.columns(2)
+                                        for i, (label, value) in enumerate(specific_details):
+                                            with cols[i % 2]:
+                                                # 긴 텍스트는 줄바꿈 적용
+                                                if isinstance(value, str) and '\n' in value:
+                                                    st.markdown(f"**{label}:**")
+                                                    st.markdown(value.replace('\n', '  \n'))
+                                                else:
+                                                    st.markdown(f"**{label}:** {value}")
+                                    else:
+                                        st.info(get_translation('no_specific_fields'))
+                                else:
+                                    st.info(get_translation('no_specific_fields'))
+                        
+                            # === 3. 커스텀 섹션 필드 추가 (텍스트 형태) - 별도로 표시 ===
                             default_sections = ['has_accessory_specs', 'has_spare_part_specs', 'has_screw_specs', 'has_oil_specs', 'has_documents']
+                            custom_section_list = []
+
                             for config_key, config_value in fields_config.items():
                                 if config_key.startswith('has_') and config_value == True and config_key not in default_sections and config_key != 'has_other_notes':
                                     section_key = config_key.replace('has_', '')
@@ -1609,40 +1638,33 @@ else:
                                     if field_def:
                                         custom_value = eq.get(section_key, '') or details.get(section_key, '')
                                         if custom_value and str(custom_value).strip():
-                                            details_list.append((field_def['field_label'], custom_value))
-                            
+                                            custom_section_list.append((field_def['field_label'], custom_value))
+
+                            # 커스텀 섹션이 있을 경우에만 표시
+                            if custom_section_list:
+                                st.markdown("---")
+                                st.subheader("추가 정보")
+                                cols = st.columns(2)
+                                for i, (label, value) in enumerate(custom_section_list):
+                                    with cols[i % 2]:
+                                        # 긴 텍스트는 줄바꿈 적용
+                                        if isinstance(value, str) and '\n' in value:
+                                            st.markdown(f"**{label}:**")
+                                            st.markdown(value.replace('\n', '  \n'))
+                                        else:
+                                            st.markdown(f"**{label}:** {value}")
+                        
                             # === 4. 기타사항 추가 ===
                             other_notes = eq.get('other_notes', '') or details.get('other_notes', '')
                             if other_notes and str(other_notes).strip():
-                                details_list.append((get_translation('other_notes'), other_notes))
-                            
-                            # 2열 레이아웃으로 표시
-                            half = (len(details_list) + 1) // 2
-                            first_col = details_list[:half]
-                            second_col = details_list[half:]
-                            
-                            col_row1, col_row2 = st.columns(2)
-                            with col_row1:
-                                for label, value in first_col:
-                                    # 긴 텍스트는 줄바꿈 적용
-                                    if isinstance(value, str) and '\n' in value:
-                                        st.markdown(f"**{label}:**")
-                                        st.markdown(value.replace('\n', '  \n'))
-                                    else:
-                                        st.markdown(f"**{label}:** {value}")
-                            with col_row2:
-                                for label, value in second_col:
-                                    # 긴 텍스트는 줄바꿈 적용
-                                    if isinstance(value, str) and '\n' in value:
-                                        st.markdown(f"**{label}:**")
-                                        st.markdown(value.replace('\n', '  \n'))
-                                    else:
-                                        st.markdown(f"**{label}:** {value}")
-
+                                st.markdown("---")
+                                st.subheader(get_translation('other_notes'))
+                                st.markdown(other_notes.replace('\n', '  \n'))
+                        
                             # === 5. 테이블 형태 섹션 (선택적 섹션들) - 항상 제목 표시 ===
                             st.markdown("---")
                             st.markdown("##### 📋 상세 사양")
-                            
+                        
                             # 부속기기
                             if fields_config.get('has_accessory_specs', False):
                                 st.markdown(f"**{get_translation('accessory_specs')}**")
@@ -1664,7 +1686,7 @@ else:
                                 else:
                                     st.info("등록된 부속기기가 없습니다.")
                                 st.markdown("")
-                            
+                        
                             # SPARE PART
                             if fields_config.get('has_spare_part_specs', False):
                                 st.markdown(f"**{get_translation('spare_part_specs')}**")
@@ -1682,7 +1704,7 @@ else:
                                 else:
                                     st.info("등록된 SPARE PART가 없습니다.")
                                 st.markdown("")
-                            
+                        
                             # 스크류 사양
                             if fields_config.get('has_screw_specs', False):
                                 st.markdown(f"**{get_translation('screw_specs')}**")
@@ -1722,7 +1744,7 @@ else:
                                         '교체 주기': get_translation('col_maintenance_cycle')
                                     })
                                     st.dataframe(df, width='stretch')
-                                    
+                                
                                     # oil_notes와 aftercare
                                     oil_notes = next((item['notes'] for item in oil_data if 'notes' in item), '')
                                     oil_aftercare = next((item['aftercare'] for item in oil_data if 'aftercare' in item), '')
@@ -1733,7 +1755,7 @@ else:
                                 else:
                                     st.info("등록된 작동유 정보가 없습니다.")
                                 st.markdown("")
-                            
+                        
                             # 문서
                             st.markdown(f"**{get_translation('documents')}**")
                             doc_data = eq.get('documents', [])
