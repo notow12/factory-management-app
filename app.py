@@ -6,6 +6,7 @@ import os
 import pandas as pd
 import uuid
 from datetime import datetime, date, time
+from datetime import datetime, timedelta
 import json
 import re
 import requests
@@ -28,26 +29,7 @@ def init_connection():
 supabase: Client = init_connection()
 
 # 필드 정의 (특화 필드만 - 공통 필드는 제외)
-FIELD_DEFINITIONS = {
-    # 사출기 전용
-    'min_mold_thickness': {'label': 'min_mold_thickness', 'type': 'text'},
-    'max_mold_thickness': {'label': 'max_mold_thickness', 'type': 'text'},
-    'tie_bar_spacing': {'label': 'tie_bar_spacing', 'type': 'text'},
-    'plate_thickness': {'label': 'plate_thickness', 'type': 'text'},
-    'oil_flow_rate': {'label': 'oil_flow_rate', 'type': 'text'},
-    'max_displacement': {'label': 'max_displacement', 'type': 'text'},
-    
-    # CNC 전용
-    'spindle_speed': {'label': '스핀들 속도', 'type': 'text'},
-    'table_size': {'label': '테이블 크기', 'type': 'text'},
-    'axis_travel': {'label': '축 이동거리', 'type': 'text'},
-    'tool_capacity': {'label': '공구 용량', 'type': 'text'},
-    
-    # 프레스 전용
-    'press_capacity': {'label': '프레스 용량', 'type': 'text'},
-    'stroke_length': {'label': '스트로크 길이', 'type': 'text'},
-    'bed_size': {'label': '베드 크기', 'type': 'text'},
-}
+# 주석: 동적 필드 정의로 대체되었으므로 하드코딩 제거
 
 # ------------------------------------------------------
 # 세션 상태 초기화
@@ -91,21 +73,28 @@ def get_factories():
     res = supabase.from_('factories').select('*').execute()
     return res.data if res.data else []
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=60)  # TTL을 60초로 줄임
 def get_equipment(factory_id=None):
     query = supabase.from_('equipment').select('*, factories(name)').order('name')
     if factory_id:
         query = query.eq('factory_id', factory_id)
     res = query.execute()
+    if res.data:
+        for eq in res.data:
+            if eq.get('details'):
+                try:
+                    eq['details'] = json.loads(eq['details'])
+                except json.JSONDecodeError:
+                    eq['details'] = {}
     return res.data if res.data else []
 
 @st.cache_data(ttl=600)
 def get_maintenance_logs(equipment_id=None):
-     query = supabase.from_('maintenance_logs').select('*, equipment(name, factories(name)), action_category').order('maintenance_date', desc=True)
-     if equipment_id:
-         query = query.eq('equipment_id', equipment_id)
-     res = query.execute()
-     return res.data if res.data else []
+    query = supabase.from_('maintenance_logs').select('*, equipment(name, factories(name)), action_category, currency').order('maintenance_date', desc=True)
+    if equipment_id:
+        query = query.eq('equipment_id', equipment_id)
+    res = query.execute()
+    return res.data if res.data else []
 
 @st.cache_data(ttl=0)
 
@@ -239,7 +228,77 @@ def serialize_data_for_json(data):
     else:
         return data
 
-def update_equipment(equipment_id, name, product_name, maker, model, details_dict, accessory_specs, spare_part_specs, documents, screw_specs, oil_specs, status, uploaded_images, uploaded_documents=None, oil_notes='', oil_aftercare=''):
+@st.cache_data(ttl=600)
+def get_preventive_maintenance(equipment_id=None):
+    query = supabase.table('preventive_maintenance').select('*').eq('is_active', True)
+    if equipment_id:
+        query = query.eq('equipment_id', equipment_id)
+    response = query.execute()
+    return response.data
+
+def add_preventive_maintenance(equipment_id, maintenance_item, cycle_days, description=None, last_maintenance_date=None, notification_threshold=7, estimated_cost=0.0, estimated_currency='KRW'):
+    data = {
+        'equipment': equipment_id,
+        'maintenance item': maintenance_item,
+        'cycle_days': cycle_days,
+        'description': description,
+        'notification_threshold': notification_threshold,
+        'estimated_cost': estimated_cost,
+        'estimated_currency': estimated_currency
+    }
+    if last_maintenance_date:
+        data['last_maintenance_date'] = last_maintenance_date.isoformat()
+    supabase.from_('preventive_maintenance').insert(data).execute()
+    st.cache_data.clear()
+
+def add_preventive_maintenance_log(preventive_maintenance_id, equipment_id, engineer, action, notes=None, maintenance_date=None, maintenance_time=None, cost=0.0, currency='KRW', image_urls=None):
+    combined_dt = datetime.combine(maintenance_date or date.today(), maintenance_time or time(0, 0))
+    data = {
+        'preventive_maintenance_id': preventive_maintenance_id,
+        'equipment_id': equipment_id,
+        'maintenance_date': combined_dt.isoformat(),
+        'engineer': engineer,
+        'action': action,
+        'notes': notes,
+        'cost': cost,
+        'currency': currency,
+        'image_urls': image_urls
+    }
+    supabase.from_('preventive_maintenance_logs').insert(data).execute()
+    st.cache_data.clear()
+
+def update_preventive_maintenance(item_id, maintenance_item, cycle_days, description=None, last_maintenance_date=None, notification_threshold=7, estimated_cost=0.0, estimated_currency='KRW'):
+    data = {
+        'maintenance_item': maintenance_item,
+        'cycle_days': cycle_days,
+        'description': description,
+        'notification_threshold': notification_threshold,
+        'estimated_cost': estimated_cost,
+        'estimated_currency': estimated_currency,
+        'updated_at': datetime.now().isoformat()
+    }
+    if last_maintenance_date:
+        data['last_maintenance_date'] = last_maintenance_date.isoformat()
+    else:
+        data['last_maintenance_date'] = None
+    supabase.from_('preventive_maintenance').update(data).eq('id', item_id).execute()
+    st.cache_data.clear()
+
+@st.cache_data(ttl=600)
+def get_preventive_maintenance_logs(preventive_maintenance_id=None, equipment_id=None):
+    query = supabase.from_('preventive_maintenance_logs').select('*, equipment(name), preventive_maintenance(maintenance_item)').order('maintenance_date', desc=True)
+    if preventive_maintenance_id:
+        query = query.eq('preventive_maintenance_id', preventive_maintenance_id)
+    if equipment_id:
+        query = query.eq('equipment_id', equipment_id)
+    res = query.execute()
+    return res.data if res.data else []
+
+def delete_preventive_maintenance(item_id):
+    supabase.from_('preventive_maintenance').delete().eq('id', item_id).execute()
+    st.cache_data.clear()
+
+def add_equipment(factory_id, name, product_name, maker, model, details_dict, accessory_specs, spare_part_specs, documents, screw_specs, oil_specs, status, uploaded_images, uploaded_documents=None, oil_notes='', oil_aftercare='', selected_template=None):
     try:
         # 날짜 형식 변환
         for part in spare_part_specs:
@@ -260,19 +319,18 @@ def update_equipment(equipment_id, name, product_name, maker, model, details_dic
                 screw_specs['wear_resistant_cycle'] = screw_specs['wear_resistant_cycle_df'].to_dict('records')
                 del screw_specs['wear_resistant_cycle_df']
         
-        # equipment 테이블 실제 컬럼 (수정: equipment_grade 추가)
+        # equipment 테이블 실제 컬럼
         direct_columns = [
             'product_name', 'maker', 'serial_number', 'production_date',
             'acquisition_cost', 'acquisition_date', 'acquisition_basis',
             'purchase_date', 'installation_location', 'motor_capacity',
             'heater_capacity', 'total_weight', 'other_notes',
-            'equipment_grade'  # 추가
+            'equipment_grade'
         ]
         
         # details_dict를 direct 필드와 extra 필드로 분리
         direct_fields = {}
         extra_fields = {}
-        
         for key, value in details_dict.items():
             if key in direct_columns:
                 direct_fields[key] = value
@@ -283,12 +341,7 @@ def update_equipment(equipment_id, name, product_name, maker, model, details_dic
         oil_specs_with_notes = oil_specs + [{'notes': oil_notes}, {'aftercare': oil_aftercare}]
         
         # 이미지 처리
-        if uploaded_images:
-            new_image_urls = upload_images(uploaded_images)
-            existing_image_urls = supabase.table('equipment').select('image_urls').eq('id', equipment_id).execute().data[0].get('image_urls', '')
-            combined_image_urls = f"{existing_image_urls},{new_image_urls}" if existing_image_urls else new_image_urls
-        else:
-            combined_image_urls = supabase.table('equipment').select('image_urls').eq('id', equipment_id).execute().data[0].get('image_urls', '')
+        image_urls = upload_images(uploaded_images) if uploaded_images else None
         
         # 문서 처리
         updated_documents = documents.copy() if documents else []
@@ -305,14 +358,20 @@ def update_equipment(equipment_id, name, product_name, maker, model, details_dic
                         'url': doc_url,
                         'file_type': uploaded_doc.type
                     }
-                    if not any(d['기술 자료명'] == file_data['기술 자료명'] for d in updated_documents):  # 이름 기반 중복 체크
+                    if not any(d['기술 자료명'] == file_data['기술 자료명'] for d in updated_documents):
                         updated_documents.append(file_data)
         
-        # 업데이트 데이터 준비
-        update_data = {
+        # 🔥 핵심 수정: equipment_type과 fields_config 추가
+        equipment_type = selected_template.get('name', 'injection_molding') if selected_template else 'injection_molding'
+        fields_config = selected_template.get('fields_config', {}) if selected_template else {}
+        
+        # 삽입 데이터 준비
+        insert_data = {
+            "factory_id": factory_id,
             "name": name,
             "model": model,
-            "equipment_type": selected_equipment_type,
+            "equipment_type": equipment_type,  # 🔥 수정
+            "fields_config": json.dumps(fields_config, ensure_ascii=False),  # 🔥 추가
             "status": status,
             **direct_fields,
             "details": json.dumps(extra_fields, ensure_ascii=False),
@@ -321,37 +380,162 @@ def update_equipment(equipment_id, name, product_name, maker, model, details_dic
             "documents": json.dumps(updated_documents, ensure_ascii=False),
             "screw_specs": json.dumps(screw_specs, ensure_ascii=False) if screw_specs else None,
             "oil_specs": json.dumps(oil_specs_with_notes, ensure_ascii=False),
-            "image_urls": combined_image_urls
+            "image_urls": image_urls
+        }
+        
+        # Supabase에 삽입
+        response = supabase.table('equipment').insert(insert_data).execute()
+        if response.data:
+            st.cache_data.clear()  # 캐시 갱신
+            return True, "설비가 성공적으로 추가되었습니다."
+        else:
+            return False, "설비 추가 실패: 데이터 삽입 오류"
+    except Exception as e:
+        return False, f"설비 추가 중 오류 발생: {str(e)}"
+
+def update_equipment(equipment_id, name, product_name, maker, model, details_dict, accessory_specs, spare_part_specs, documents, screw_specs, oil_specs, status, uploaded_images, uploaded_documents=None, oil_notes='', oil_aftercare='', final_image_urls=None):  # 🔥 파라미터 추가
+    try:
+        # 날짜 형식 변환
+        for part in spare_part_specs:
+            if isinstance(part.get('교체 일자'), date):
+                part['교체 일자'] = part['교체 일자'].isoformat()
+        for key, value in details_dict.items():
+            if isinstance(value, date):
+                details_dict[key] = value.isoformat() if value else None
+        
+        # 스크류 사양 처리
+        if not isinstance(screw_specs, dict):
+            screw_specs = {}
+        else:
+            if 'general_cycle_df' in screw_specs and isinstance(screw_specs['general_cycle_df'], pd.DataFrame):
+                screw_specs['general_cycle'] = screw_specs['general_cycle_df'].to_dict('records')
+                del screw_specs['general_cycle_df']
+            if 'wear_resistant_cycle_df' in screw_specs and isinstance(screw_specs['wear_resistant_cycle_df'], pd.DataFrame):
+                screw_specs['wear_resistant_cycle'] = screw_specs['wear_resistant_cycle_df'].to_dict('records')
+                del screw_specs['wear_resistant_cycle_df']
+        
+        # equipment 테이블 실제 컬럼
+        direct_columns = [
+            'product_name', 'maker', 'serial_number', 'production_date',
+            'acquisition_cost', 'acquisition_date', 'acquisition_basis',
+            'purchase_date', 'installation_location', 'motor_capacity',
+            'heater_capacity', 'total_weight', 'other_notes',
+            'equipment_grade'
+        ]
+        
+        # details_dict를 direct 필드와 extra 필드로 분리
+        direct_fields = {}
+        extra_fields = {}
+        
+        for key, value in details_dict.items():
+            if key in direct_columns:
+                direct_fields[key] = value
+            else:
+                extra_fields[key] = value
+        
+        # 작동유 사양에 노트 추가
+        oil_specs_with_notes = oil_specs + [{'notes': oil_notes}, {'aftercare': oil_aftercare}]
+        
+        # 🔥 이미지 처리 로직 수정
+        if final_image_urls is not None:
+            # final_image_urls가 제공된 경우 (체크박스로 선택된 이미지들)
+            combined_image_urls = ','.join(final_image_urls) if final_image_urls else ''
+            
+            # 삭제된 이미지 파일 정리 (선택사항)
+            current_eq_data = supabase.table('equipment').select('image_urls').eq('id', equipment_id).execute().data[0]
+            old_urls = [url.strip() for url in current_eq_data.get('image_urls', '').split(',') if url.strip()]
+            deleted_urls = [url for url in old_urls if url not in final_image_urls]
+            
+            # Supabase Storage에서 삭제된 이미지 제거
+            for url in deleted_urls:
+                try:
+                    file_name = url.split('/')[-1]
+                    supabase.storage.from_('equipment_images').remove([file_name])
+                except Exception as e:
+                    st.warning(f"이미지 삭제 실패 ({file_name}): {e}")
+        else:
+            # final_image_urls가 제공되지 않은 경우 기존 이미지 유지
+            existing_image_urls = supabase.table('equipment').select('image_urls').eq('id', equipment_id).execute().data[0].get('image_urls', '')
+            combined_image_urls = existing_image_urls
+        
+        # 새 이미지 업로드 및 추가
+        if uploaded_images:
+            new_image_urls = upload_images(uploaded_images)
+            if new_image_urls:
+                if combined_image_urls:
+                    combined_image_urls = f"{combined_image_urls},{new_image_urls}"
+                else:
+                    combined_image_urls = new_image_urls
+        
+        # 문서 처리
+        updated_documents = documents.copy() if documents else []
+        if uploaded_documents:
+            for uploaded_doc in uploaded_documents:
+                doc_url = upload_document_to_supabase(uploaded_doc)
+                if doc_url:
+                    file_data = {
+                        '기술 자료명': uploaded_doc.name,
+                        '취급 설명서': '',
+                        '전기 도면': '',
+                        '유.증압도면': '',
+                        '윤활 기준표': '',
+                        'url': doc_url,
+                        'file_type': uploaded_doc.type
+                    }
+                    if not any(d['기술 자료명'] == file_data['기술 자료명'] for d in updated_documents):
+                        updated_documents.append(file_data)
+        
+        # 업데이트 데이터 준비
+        update_data = {
+            "name": name,
+            "model": model,
+            "status": status,
+            **direct_fields,
+            "details": json.dumps(extra_fields, ensure_ascii=False),
+            "accessory_specs": json.dumps(accessory_specs, ensure_ascii=False),
+            "spare_part_specs": json.dumps(spare_part_specs, ensure_ascii=False),
+            "documents": json.dumps(updated_documents, ensure_ascii=False),
+            "screw_specs": json.dumps(screw_specs, ensure_ascii=False) if screw_specs else None,
+            "oil_specs": json.dumps(oil_specs_with_notes, ensure_ascii=False),
+            "image_urls": combined_image_urls  # 🔥 수정된 이미지 URL 적용
         }
         
         # Supabase 업데이트
         supabase.table('equipment').update(update_data).eq('id', equipment_id).execute()
         st.cache_data.clear()
-        # 제출 후 세션 초기화 (중복 방지)
-        st.session_state.edit_documents = []  # 세션 초기화
         return True, "설비 정보가 업데이트되었습니다."
     except Exception as e:
         return False, str(e)
 
 def delete_equipment(equipment_id):
-    current_eq_data = supabase.from_('equipment').select('image_urls').eq('id', equipment_id).single().execute().data
-    old_urls = current_eq_data['image_urls'].split(',') if current_eq_data and current_eq_data['image_urls'] else []
-    for url in old_urls:
-        try:
-            file_name = url.split('/')[-1]
-            supabase.storage.from_('equipment_images').remove([file_name])
-        except Exception as e:
-            st.warning(f"이미지 삭제 실패: {e}")
+    try:
+        # 현재 설비 데이터 조회
+        current_eq_data = supabase.from_('equipment').select('image_urls').eq('id', equipment_id).single().execute().data
+        old_urls = current_eq_data['image_urls'].split(',') if current_eq_data and current_eq_data['image_urls'] else []
+        
+        # 이미지 삭제
+        for url in old_urls:
+            try:
+                file_name = url.split('/')[-1]
+                supabase.storage.from_('equipment_images').remove([file_name])
+            except Exception as e:
+                return (False, f"이미지 삭제 실패: {str(e)}")
 
-    supabase.from_('equipment_status_history').delete().eq('equipment_id', equipment_id).execute()
-    supabase.from_('maintenance_logs').delete().eq('equipment_id', equipment_id).execute()
-    supabase.from_('equipment').delete().eq('id', equipment_id).execute()
+        # 관련 데이터 삭제
+        supabase.from_('equipment_status_history').delete().eq('equipment_id', equipment_id).execute()
+        supabase.from_('maintenance_logs').delete().eq('equipment_id', equipment_id).execute()
+        response = supabase.from_('equipment').delete().eq('id', equipment_id).execute()
 
-    st.success("설비 및 관련 데이터 삭제 완료")
-    st.session_state.selected_eq_id_admin = None
-    st.cache_data.clear()
+        # 삭제 성공 여부 확인
+        if response.data is not None:  # Supabase 응답이 성공적으로 데이터 삭제를 확인
+            return (True, "설비 및 관련 데이터 삭제 완료")
+        else:
+            return (False, "설비 삭제 실패: 데이터가 삭제되지 않음")
 
-def add_log(equipment_id, engineer, action, notes, maintenance_date, maintenance_time, image_urls=None, cost=0.0, action_category=None):
+    except Exception as e:
+        return (False, f"설비 삭제 중 오류 발생: {str(e)}")
+
+def add_log(equipment_id, engineer, action, notes, maintenance_date, maintenance_time, image_urls=None, cost=0.0, action_category=None, currency='KRW'):
     combined_dt = datetime.combine(maintenance_date, maintenance_time)
     supabase.from_('maintenance_logs').insert({
         'equipment_id': equipment_id,
@@ -361,9 +545,10 @@ def add_log(equipment_id, engineer, action, notes, maintenance_date, maintenance
         'notes': notes,
         'image_urls': image_urls,
         'cost': cost,
-        'action_category': action_category
+        'action_category': action_category,
+        'currency': currency
     }).execute()
-    st.success("정비 이력 추가 완료")
+    st.success(get_translation('log_added_success'))
     st.cache_data.clear()
 
 def update_log(log_id, engineer, action, notes, uploaded_images, action_category=None):
@@ -505,6 +690,17 @@ def add_equipment_template(name, display_name, fields_config):
     except Exception as e:
         return False, str(e)
 
+def reset_add_equipment_form_state():
+    # 세션 상태 초기화 (필요한 키만 리셋)
+    keys_to_reset = [
+        'add_accessory_specs', 'add_spare_part_specs', 'add_documents', 'add_eq_images',
+        'screw_specs', 'oil_specs', 'add_other_notes', 'add_oil_notes', 'add_oil_aftercare'
+    ]
+    for key in keys_to_reset:
+        if key in st.session_state:
+            del st.session_state[key]
+    st.session_state['add_form_reset'] = True  # 리셋 플래그 (선택적)
+
 def update_equipment_template(template_id, name, display_name, fields_config):
     """설비 템플릿 수정"""
     try:
@@ -579,6 +775,26 @@ TRANSLATIONS = {
         'specific_fields': '전용 사양',
         'login_fail': '비밀번호 오류',
         'current_factory': '현재 공장',
+        "currency_krw": "한국 원",
+        "currency_vnd": "베트남 동",
+        "currency_thb": "태국 바트",
+        "currency_mxn": "멕시코 페소",
+        "currency_usd": "미국 달러",
+        "select_currency": "화폐 단위 선택",
+        "preventive_maintenance": "설비 예방 정비",
+        "maintenance_item": "정비 항목",
+        "cycle_days": "정비 주기(일)",
+        "description": "설명",
+        "add_maintenance_item": "정비 항목 추가",
+        "delete_maintenance_item": "정비 항목 삭제",
+        "no_maintenance_items": "등록된 예방 정비 항목이 없습니다.",
+        "add_item_success": "정비 항목이 성공적으로 추가되었습니다.",
+        "delete_item_success": "정비 항목이 성공적으로 삭제되었습니다.",
+        "maintenance_cost": "정비 비용",
+        "log_added_success": "정비 이력이 성공적으로 추가되었습니다.",
+        "upcoming_maintenance": "다가오는 정비",
+        "days_remaining": "남은 일수",
+        "no_upcoming_maintenance": "다가오는 예방 정비 항목이 없습니다.",
         'action_category': '정비 이력 세부 분류',
         'electrical': '전장',
         'mechanical': '기구부',
@@ -671,6 +887,7 @@ TRANSLATIONS = {
         'viscosity_date': '점도 일자',
         'viscosity_result': '측정 결과',
         'log_details': '상세 정비 이력',
+        'preventive_maintenance_admin': '예방정비 수정/삭제',
         'col_seq': '순번',
         'col_accessory_name': '부속기기 명',
         'col_accessory_type': '형식',
@@ -743,8 +960,28 @@ TRANSLATIONS = {
         'electrical': 'Điện',
         'mechanical': 'Cơ khí',
         'drive': 'Truyền động',
+        "currency_krw": "Hàn Quốc Won",
+        "currency_vnd": "Việt Nam Đồng",
+        "preventive_maintenance": "Bảo trì Phòng ngừa Thiết bị",
+        "maintenance_item": "Hạng mục Bảo trì",
+        "cycle_days": "Chu kỳ Bảo trì (ngày)",
+        "description": "Mô tả",
+        "add_maintenance_item": "Thêm Hạng mục Bảo trì",
+        "delete_maintenance_item": "Xóa Hạng mục Bảo trì",
+        "no_maintenance_items": "Không có hạng mục bảo trì phòng ngừa nào được đăng ký.",
+        "add_item_success": "Hạng mục bảo trì đã được thêm thành công.",
+        "delete_item_success": "Hạng mục bảo trì đã được xóa thành công.",
+        "currency_thb": "Baht Thái",
+        "currency_mxn": "Peso Mexico",
+        "currency_usd": "Đô la Mỹ",
+        "select_currency": "Chọn đơn vị tiền tệ",
+        "maintenance_cost": "Chi phí bảo trì",
+        "log_added_success": "Hồ sơ bảo trì đã được thêm thành công.",
         'other_category': 'Khác',
         'view_maintenance_log': 'Xem lịch sử bảo trì',
+        "upcoming_maintenance": "Bảo trì sắp tới",
+        "days_remaining": "Số ngày còn lại",
+        "no_upcoming_maintenance": "Không có bảo trì sắp tới",
         'custom_sections': 'Phần tùy chỉnh',
         'specific_fields': 'Thông số chuyên dụng',
         'record_status': 'Ghi lại trạng thái',
@@ -777,6 +1014,7 @@ TRANSLATIONS = {
         'maintenance_time': 'Thời gian bảo trì',
         'add_log_button': 'Thêm lịch sử',
         'no_logs': 'Không có lịch sử bảo trì cho thiết bị đã chọn.',
+        'preventive_maintenance_admin': 'Chỉnh sửa/Xóa bảo trì phòng ngừa',
         'view_detail_log': 'Chọn mục để xem chi tiết',
         'attachments': 'Tệp đính kèm',
         'no_attachments': 'Không có hình ảnh đính kèm.',
@@ -890,6 +1128,9 @@ TRANSLATIONS = {
         'add_equipment': 'เพิ่มอุปกรณ์',
         'add_maintenance_log': 'เพิ่มประวัติการบำรุงรักษา',
         'view_maintenance_log': 'ดูประวัติการบำรุงรักษา',
+        "upcoming_maintenance": "การบำรุงรักษาที่กำลังจะมาถึง",
+        "days_remaining": "จำนวนวันที่เหลือ",
+        "no_upcoming_maintenance": "ไม่มีการบำรุงรักษาที่กำลังจะมาถึง",
         'record_status': 'บันทึกสถานะ',
         'specific_fields': 'ข้อกำหนดเฉพาะ',
         'admin_mode': 'ผู้ดูแลระบบ',
@@ -897,8 +1138,26 @@ TRANSLATIONS = {
         'capacity_specs': 'ปริมาณและข้อมูลจำเพาะ',
         'motor_capacity_specs': 'ความจุ MOTOR',
         'heater_capacity_specs': 'ความจุของฮีตเตอร์',
+        "preventive_maintenance": "การบำรุงรักษาเชิงป้องกันอุปกรณ์",
+        "maintenance_item": "รายการบำรุงรักษา",
+        "cycle_days": "รอบการบำรุงรักษา (วัน)",
+        "description": "คำอธิบาย",
+        "add_maintenance_item": "เพิ่มรายการบำรุงรักษา",
+        "delete_maintenance_item": "ลบรายการบำรุงรักษา",
+        'preventive_maintenance_admin': 'แก้ไข/ลบการบำรุงรักษาเชิงป้องกัน',
+        "no_maintenance_items": "ไม่มีรายการบำรุงรักษาเชิงป้องกันที่ลงทะเบียน",
+        "add_item_success": "เพิ่มรายการบำรุงรักษาสำเร็จ",
+        "delete_item_success": "ลบรายการบำรุงรักษาสำเร็จ",
         'total_weight': 'น้ำหนักรวมเครื่องจักร (ตัน)',
         'add_row_instruction': 'กดปุ่ม '+' ในตารางเพื่อเพิ่มแถว',
+        "currency_krw": "วอนเกาหลี",
+        "currency_vnd": "ดองเวียดนาม",
+        "currency_thb": "บาทไทย",
+        "currency_mxn": "เปโซเม็กซิโก",
+        "currency_usd": "ดอลลาร์สหรัฐ",
+        "select_currency": "เลือกสกุลเงิน",
+        "maintenance_cost": "ค่าใช้จ่ายในการบำรุงรักษา",
+        "log_added_success": "บันทึกการบำรุงรักษาเพิ่มสำเร็จ",
         'status': 'สถานะ',
         'no_specific_fields': 'ไม่มีข้อมูลข้อกำหนดเฉพาะ.',
         'normal': 'ปกติ',
@@ -1042,6 +1301,9 @@ TRANSLATIONS = {
         'dashboard': 'Panel de control',
         'add_equipment': 'Añadir equipo',
         'add_maintenance_log': 'Añadir registro de mantenimiento',
+        "upcoming_maintenance": "Mantenimiento próximo",
+        "days_remaining": "Días restantes",
+        "no_upcoming_maintenance": "No hay mantenimiento próximo",
         'view_maintenance_log': 'Ver registro de mantenimiento',
         'no_custom_sections': 'No hay configuraciones de secciones personalizadas.',
         'no_active_custom_sections': 'No hay secciones personalizadas activadas.',
@@ -1051,7 +1313,25 @@ TRANSLATIONS = {
         'custom_sections': 'Secciones personalizadas',
         'no_equipment_registered': 'No hay equipos registrados. Intente añadir uno nuevo.',
         'add_row_instruction': 'Presiona el botón '+' en la tabla para agregar una fila.',
+        "preventive_maintenance": "Mantenimiento Preventivo de Equipos",
+        "maintenance_item": "Ítem de Mantenimiento",
+        "cycle_days": "Ciclo de Mantenimiento (días)",
+        "description": "Descripción",
+        "add_maintenance_item": "Agregar Ítem de Mantenimiento",
+        "delete_maintenance_item": "Eliminar Ítem de Mantenimiento",
+        "no_maintenance_items": "No hay ítems de mantenimiento preventivo registrados.",
+        'preventive_maintenance_admin': 'Editar/Eliminar mantenimiento preventivo',
+        "add_item_success": "El ítem de mantenimiento se ha añadido con éxito.",
+        "delete_item_success": "El ítem de mantenimiento se ha eliminado con éxito.",
         'capacity_specs': 'Capacidad y especificaciones',
+        "currency_krw": "Won surcoreano",
+        "currency_vnd": "Dong vietnamita",
+        "currency_thb": "Baht tailandés",
+        "currency_mxn": "Peso mexicano",
+        "currency_usd": "Dólar estadounidense",
+        "select_currency": "Seleccionar moneda",
+        "maintenance_cost": "Costo de mantenimiento",
+        "log_added_success": "El registro de mantenimiento se ha añadido con éxito.",
         'motor_capacity_specs': 'Capacidad del MOTOR',
         'heater_capacity_specs': 'Capacidad del calentador',
         'total_weight': 'Peso total de la máquina (ton)',
@@ -1480,6 +1760,7 @@ else:
         get_translation('add_maintenance_log'),
         get_translation('view_maintenance_log'),
         get_translation('record_status'),
+        get_translation('preventive_maintenance'),
         get_translation('admin_mode')
     ])
 
@@ -1499,6 +1780,8 @@ else:
         if not filtered_equipment:
             st.info(get_translation('no_equipment_registered'))
         else:
+            # 수정: 필드 정의 동적으로 로드
+            field_definitions = load_field_definitions()
             for eq in filtered_equipment:
                 status_color = "green" if eq.get('status') == '정상' else "red" if eq.get('status') == '고장' else "orange"  # 매각에 orange 색상 추가
                 status_text = get_translation('normal') if eq.get('status') == '정상' else get_translation('faulty') if eq.get('status') == '고장' else get_translation('sold')
@@ -1507,14 +1790,13 @@ else:
                         expanded=False):
                     col1, col2 = st.columns([1, 2])
                     with col1:
-                        # 이미지 표시
+                        # 이미지 표시 (수정: 오류 처리 강화 및 스타일 개선)
                         if eq.get('image_urls'):
-                            image_urls = eq['image_urls'].split(',') if isinstance(eq['image_urls'], str) else []
+                            image_urls = [url.strip() for url in eq['image_urls'].split(',') if url.strip()] if isinstance(eq['image_urls'], str) else []
                             if image_urls:
                                 for url in image_urls:
-                                    url = url.strip()
                                     try:
-                                        st.image(url, width=300, caption=f"{eq['name']} 이미지")
+                                        st.markdown(f'<img src="{url}" style="width:300px; height:auto;" alt="{eq["name"]} 이미지">', unsafe_allow_html=True)
                                     except Exception as e:
                                         st.warning(f"이미지 로드 실패 ({url}): {str(e)}")
                             else:
@@ -1537,6 +1819,7 @@ else:
                                 elif new_status.startswith('💰'):
                                     final_status = '매각'
                                 add_status_history(eq['id'], final_status, notes, history_date, history_time)
+                                st.cache_data.clear()  # 수정: 상태 변경 후 캐시 갱신
                                 st.rerun()
                     with col2:
                         # 설비 상세 정보 (통합 표시)
@@ -1549,7 +1832,6 @@ else:
                             if production_date:
                                 current_date = date.today()
                                 years = current_date.year - production_date.year
-                                # 월/일을 고려한 정확한 연식 계산
                                 if (current_date.month, current_date.day) < (production_date.month, production_date.day):
                                     years -= 1
                                 st.markdown(
@@ -1566,7 +1848,7 @@ else:
                                 f"<b>{get_translation('equipment_age')}:</b> {get_translation('not_available')}",
                                 unsafe_allow_html=True
                             )
-        
+            
                         try:
                             # details JSON 로드
                             raw_details = eq.get('details')
@@ -1581,8 +1863,6 @@ else:
                             else:
                                 fields_config = json.loads(str(raw_fields_config) if raw_fields_config else '{}')
 
-                            all_fields = get_field_definitions()
-                            
                             # === 1. 기본 정보 (2열 레이아웃) ===
                             with st.container():
                                 details_list = [
@@ -1606,27 +1886,25 @@ else:
                                 cols = st.columns(2)
                                 for i, (label, value) in enumerate(details_list):
                                     with cols[i % 2]:
-                                        st.write(f"**{label}:** {value}")
+                                        st.markdown(f"**{label}:** {value}")
 
-                            # === 2. 특화 필드 추가 (equipment 테이블에서 직접 가져오기) ===
+                            # === 2. 특화 필드 추가 (수정: field_definitions 사용) ===
                             with st.container():
                                 specific_field_keys = fields_config.get('specific_fields', [])
                                 if specific_field_keys:
                                     st.subheader(get_translation('specific_fields'))
                                     specific_details = []
                                     for field_key in specific_field_keys:
-                                        field_def = FIELD_DEFINITIONS.get(field_key, {'label': field_key, 'type': 'text'})
+                                        field_def = field_definitions.get(field_key, {'label': field_key, 'type': 'text'})
                                         field_value = eq.get(field_key, '') or details.get(field_key, '')
-                                        if field_value and str(field_value).strip() and str(field_value) != 'N/A':
+                                        if field_value and str(field_value) != 'N/A':
                                             translated_label = get_translation(field_def['label'])
                                             specific_details.append((translated_label, field_value))
 
                                     if specific_details:
-                                        # 2열 레이아웃으로 표시
                                         cols = st.columns(2)
                                         for i, (label, value) in enumerate(specific_details):
                                             with cols[i % 2]:
-                                                # 긴 텍스트는 줄바꿈 적용
                                                 if isinstance(value, str) and '\n' in value:
                                                     st.markdown(f"**{label}:**")
                                                     st.markdown(value.replace('\n', '  \n'))
@@ -1636,45 +1914,43 @@ else:
                                         st.info(get_translation('no_specific_fields'))
                                 else:
                                     st.info(get_translation('no_specific_fields'))
-                    
-                            # === 3. 커스텀 섹션 필드 추가 (텍스트 형태) - 별도로 표시 ===
+                        
+                            # === 3. 커스텀 섹션 필드 추가 (수정: field_definitions 사용) ===
                             default_sections = ['has_accessory_specs', 'has_spare_part_specs', 'has_screw_specs', 'has_oil_specs', 'has_documents']
                             custom_section_list = []
 
                             for config_key, config_value in fields_config.items():
                                 if config_key.startswith('has_') and config_value == True and config_key not in default_sections and config_key != 'has_other_notes':
                                     section_key = config_key.replace('has_', '')
-                                    field_def = next((f for f in all_fields if f['field_key'] == section_key), None)
+                                    field_def = field_definitions.get(section_key, {'label': section_key, 'type': 'text'})
                                     if field_def:
                                         custom_value = eq.get(section_key, '') or details.get(section_key, '')
                                         if custom_value and str(custom_value).strip():
-                                            custom_section_list.append((field_def['field_label'], custom_value))
+                                            custom_section_list.append((field_def['label'], custom_value))
 
-                            # 커스텀 섹션이 있을 경우에만 표시
                             if custom_section_list:
                                 st.markdown("---")
                                 st.subheader("추가 정보")
                                 cols = st.columns(2)
                                 for i, (label, value) in enumerate(custom_section_list):
                                     with cols[i % 2]:
-                                        # 긴 텍스트는 줄바꿈 적용
                                         if isinstance(value, str) and '\n' in value:
                                             st.markdown(f"**{label}:**")
                                             st.markdown(value.replace('\n', '  \n'))
                                         else:
                                             st.markdown(f"**{label}:** {value}")
-                    
+                        
                             # === 4. 기타사항 추가 ===
                             other_notes = eq.get('other_notes', '') or details.get('other_notes', '')
                             if other_notes and str(other_notes).strip():
                                 st.markdown("---")
                                 st.subheader(get_translation('other_notes'))
                                 st.markdown(other_notes.replace('\n', '  \n'))
-                    
-                            # === 5. 테이블 형태 섹션 (선택적 섹션들) - 항상 제목 표시 ===
+                        
+                            # === 5. 테이블 형태 섹션 (선택적 섹션들) ===
                             st.markdown("---")
                             st.markdown("##### 📋 상세 사양")
-                    
+                        
                             # 부속기기
                             if fields_config.get('has_accessory_specs', False):
                                 st.markdown(f"**{get_translation('accessory_specs')}**")
@@ -1692,11 +1968,11 @@ else:
                                         '제조처': get_translation('col_maker'),
                                         '비고': get_translation('col_notes')
                                     })
-                                    st.dataframe(df, width='stretch')
+                                    st.dataframe(df, width='stretch')  # 수정: width='stretch' 대신 use_container_width=True 사용
                                 else:
                                     st.info("등록된 부속기기가 없습니다.")
                                 st.markdown("")
-                    
+                        
                             # SPARE PART
                             if fields_config.get('has_spare_part_specs', False):
                                 st.markdown(f"**{get_translation('spare_part_specs')}**")
@@ -1714,7 +1990,7 @@ else:
                                 else:
                                     st.info("등록된 SPARE PART가 없습니다.")
                                 st.markdown("")
-                    
+                        
                             # 스크류 사양
                             if fields_config.get('has_screw_specs', False):
                                 st.markdown(f"**{get_translation('screw_specs')}**")
@@ -1724,7 +2000,6 @@ else:
                                 if screw_data and (screw_data.get('material_spec_description') or screw_data.get('general_cycle') or screw_data.get('wear_resistant_cycle')):
                                     if screw_data.get('material_spec_description'):
                                         st.markdown("*재료 사양:*")
-                                        # 원본 줄바꿈 유지
                                         material_spec = screw_data['material_spec_description']
                                         st.text(material_spec)
                                     if screw_data.get('general_cycle'):
@@ -1738,7 +2013,7 @@ else:
                                 else:
                                     st.info("등록된 스크류 사양이 없습니다.")
                                 st.markdown("")
-                    
+                        
                             # 작동유
                             if fields_config.get('has_oil_specs', False):
                                 st.markdown(f"**{get_translation('oil_specs')}**")
@@ -1754,25 +2029,23 @@ else:
                                         '교체 주기': get_translation('col_maintenance_cycle')
                                     })
                                     st.dataframe(df, width='stretch')
-                                
-                                    # oil_notes와 aftercare
+                                    
                                     oil_notes = next((item['notes'] for item in oil_data if 'notes' in item), '')
                                     oil_aftercare = next((item['aftercare'] for item in oil_data if 'aftercare' in item), '')
                                     if oil_notes:
                                         st.markdown(f"*{oil_notes}*")
                                     if oil_aftercare and oil_aftercare.strip():
-                                        st.markdown(f"*1년 경과 후:*  \n{oil_aftercare.replace(chr(10), '  ' + chr(10))}")
+                                        st.markdown(f"*1년 경과 후:*  \n{oil_aftercare.replace(chr(10), '  \n')}")
                                 else:
                                     st.info("등록된 작동유 정보가 없습니다.")
                                 st.markdown("")
-                    
+                        
                             # 문서
                             st.markdown(f"**{get_translation('documents')}**")
                             doc_data = eq.get('documents', [])
                             if isinstance(doc_data, str):
                                 doc_data = json.loads(doc_data if doc_data else '[]')
-                            # 중복 제거 (이름 기반)
-                            unique_doc_data = {d['기술 자료명']: d for d in doc_data}.values()  # 이름 중복 시 마지막 항목만 유지
+                            unique_doc_data = {d['기술 자료명']: d for d in doc_data}.values()
                             if unique_doc_data:
                                 for item in unique_doc_data:
                                     doc_name = item.get(get_translation('col_doc_name'), 'Unnamed Document')
@@ -1807,19 +2080,17 @@ else:
                                 'maintenance_date': get_translation('maintenance_date'),
                                 'engineer': get_translation('col_engineer'),
                                 'action': get_translation('col_action'),
-                                'action_category': get_translation('action_category'),  # 추가
+                                'action_category': get_translation('action_category'),
                                 'notes': get_translation('col_notes'),
                                 'image_urls': get_translation('col_image_urls')
-                                # 'equipment_name': get_translation('col_equipment_name')  # 필요 시 주석 해제
                             })[[
                                 get_translation('col_log_id'),
                                 get_translation('maintenance_date'),
                                 get_translation('col_engineer'),
-                                get_translation('action_category'),  # 추가
+                                get_translation('action_category'),
                                 get_translation('col_action'),
                                 get_translation('col_notes'),
                                 get_translation('col_image_urls')
-                                # get_translation('col_equipment_name'),  # 필요 시 주석 해제
                             ]],
                             width='stretch',
                             hide_index=True
@@ -1839,18 +2110,22 @@ else:
                                 'created_at': get_translation('col_created_at'),
                                 'status': get_translation('col_status'),
                                 'notes': get_translation('col_notes')
-                            })[[get_translation('col_history_id'), get_translation('col_created_at'),
-                                get_translation('col_status'), get_translation('col_notes')]],
+                            })[[
+                                get_translation('col_history_id'),
+                                get_translation('col_created_at'),
+                                get_translation('col_status'),
+                                get_translation('col_notes')
+                            ]],
                             width='stretch'
                         )
                     else:
                         st.info(get_translation('no_status_history'))
-    
+
 # ------------------------ 설비 추가 ------------------------
     with tabs[1]:
         st.header(get_translation('add_equipment'))
-    
-        # 내용 초기화 버튼 (상단에 배치)
+
+        # 내용 초기화 버튼 (폼 밖에 배치)
         if st.button(get_translation('reset_content'), key="reset_add_form"):
             # 모든 세션 상태 초기화
             st.session_state.accessory_specs = []
@@ -1859,17 +2134,17 @@ else:
             st.session_state.screw_specs = {
                 'screw_type_general': '일반 수지용 SCREW',
                 'applicable_general': '',
-                'screw_type_wear': '내 마모성 SCREW',
+                'screw_type_wear': '내마모성 SCREW',
                 'applicable_wear': '',
                 'material_spec_description': '',
-                'general_cycle': [],
-                'wear_resistant_cycle': []
+                'general_cycle': [{'해당 사양': '교체 주기 (월)', 'A': '5', 'B': '5', 'C': '3', 'D': '3'}],
+                'wear_resistant_cycle': [{'해당 사양': '교체 주기 (월)', 'A': '10', 'B': '10', 'C': '5', 'D': '5'}]
             }
             st.session_state.oil_specs = []
             st.session_state.custom_sections = {}
             st.session_state.other_notes = ''
             st.session_state.oil_aftercare = ''
-            # 텍스트 입력 필드 리셋 (키를 사용해 강제 초기화, 하지만 Streamlit에서 키 기반 입력은 rerun 시 유지되므로 세션으로 관리)
+            # 텍스트 입력 필드 리셋
             st.session_state.add_eq_name = ''
             st.session_state.add_eq_product_name = ''
             st.session_state.add_eq_maker = ''
@@ -1887,23 +2162,23 @@ else:
             # 특화 필드 등은 동적이라 별도 리셋 불필요
             st.success("입력 내용이 초기화되었습니다.")
             st.rerun()
-    
+
         # 설비 템플릿 로드
         templates = get_equipment_templates()
         template_options = {t['display_name']: t for t in templates}
-    
+
         # 설비 타입 선택
         selected_template_name = st.selectbox(
             "🔧 설비 종류를 선택하세요",
             options=['선택하세요'] + list(template_options.keys()),
             key="equipment_type_selector"
         )
-    
+
         if selected_template_name != '선택하세요':
             selected_template = template_options[selected_template_name]
             fields_config = selected_template['fields_config']
-    
-            # 세션 상태 초기화 (타입 선택 시 KeyError 방지 및 빈 상태로 시작, 하지만 기존 값 유지 위해 처음에만)
+
+            # 세션 상태 초기화 (타입 선택 시 KeyError 방지)
             if 'accessory_specs' not in st.session_state:
                 st.session_state.accessory_specs = []
             if 'spare_part_specs' not in st.session_state:
@@ -1914,11 +2189,11 @@ else:
                 st.session_state.screw_specs = {
                     'screw_type_general': '일반 수지용 SCREW',
                     'applicable_general': '',
-                    'screw_type_wear': '내 마모성 SCREW',
+                    'screw_type_wear': '내마모성 SCREW',
                     'applicable_wear': '',
                     'material_spec_description': '',
-                    'general_cycle': [],
-                    'wear_resistant_cycle': []
+                    'general_cycle': [{'해당 사양': '교체 주기 (월)', 'A': '5', 'B': '5', 'C': '3', 'D': '3'}],
+                    'wear_resistant_cycle': [{'해당 사양': '교체 주기 (월)', 'A': '10', 'B': '10', 'C': '5', 'D': '5'}]
                 }
             if 'oil_specs' not in st.session_state:
                 st.session_state.oil_specs = []
@@ -1928,10 +2203,10 @@ else:
                 st.session_state.other_notes = ''
             if 'oil_aftercare' not in st.session_state:
                 st.session_state.oil_aftercare = ''
-        
+
             with st.form("add_equipment_form"):
                 st.markdown(f"##### {get_translation('basic_info')}")
-            
+
                 # ========== 공통 필드 (모든 설비에 공통) ==========
                 # 첫 번째 행: 설비명, 제품명, 제조사
                 col1, col2, col3 = st.columns(3)
@@ -1977,29 +2252,33 @@ else:
                     heater_capacity = st.text_input(get_translation('heater_capacity_specs'), key="add_eq_heater_capacity")
                 with col15:
                     total_weight = st.text_input(get_translation('total_weight'), key="add_eq_total_weight")
-            
+
                 st.markdown("---")
-            
+
                 # ========== 설비 타입별 특화 필드 (동적으로 표시) ==========
                 specific_fields = fields_config.get('specific_fields', [])
                 if specific_fields:
                     st.markdown(f"##### {selected_template_name} 전용 사양")
                     specific_fields_data = {}
-                    for i in range(0, len(specific_fields), 3):
-                        cols = st.columns(3)
-                        for j in range(3):
-                            idx = i + j
-                            if idx < len(specific_fields):
-                                field_key = specific_fields[idx]
-                                field_def = FIELD_DEFINITIONS.get(field_key, {'label': field_key, 'type': 'text'})
-                                with cols[j]:
-                                    value = st.text_input(get_translation(field_key), key=f"add_spec_{field_key}")
-                                    if value.strip():  # 빈 값 제외
-                                        specific_fields_data[field_key] = value
+                    field_defs = load_field_definitions()  # 수정: 동적 로드
+                    specific_details = []
+                    for field_key in specific_fields:
+                        field_def = field_defs.get(field_key, {'label': field_key, 'type': 'text'})
+                        translated_label = get_translation(field_def['label'])
+                        specific_details.append((translated_label, field_key))
+                    if specific_details:
+                        cols = st.columns(2)
+                        for i, (label, key) in enumerate(specific_details):
+                            with cols[i % 2]:
+                                value = st.text_input(label, key=f"add_spec_{key}")
+                                if value.strip():
+                                    specific_fields_data[key] = value
+                    else:
+                        st.info(get_translation('no_specific_fields'))
                     st.markdown("---")
-            
+
                 # ========== 조건부 섹션들 ==========
-            
+
                 # 부속기기 사양
                 if fields_config.get('has_accessory_specs', True):
                     with st.expander(get_translation('accessory_specs'), expanded=False):
@@ -2035,12 +2314,12 @@ else:
                             spec['순번'] = idx + 1
                         if st.session_state.accessory_specs:
                             st.write(f"**현재 {len(st.session_state.accessory_specs)}개의 부속기기가 등록되어 있습니다.**")
-                        
+
                         # 부속기기 관련 문서 업로드
                         uploaded_documents = st.file_uploader(
                             get_translation('upload_accessory_documents'),
-                            type=['pdf', 'xlsx', 'xls'],  # 지원 파일 형식
-                            accept_multiple_files=True,   # 여러 파일 업로드 가능
+                            type=['pdf', 'xlsx', 'xls'],
+                            accept_multiple_files=True,
                             key="add_eq_accessory_documents"
                         )
                         if uploaded_documents:
@@ -2048,28 +2327,30 @@ else:
                                 file_data = {
                                     'filename': uploaded_file.name,
                                     'file_type': uploaded_file.type,
-                                    'content': uploaded_file.getvalue()  # 파일 바이너리 데이터
+                                    'content': uploaded_file.getvalue()
                                 }
-                                if file_data not in st.session_state.documents:  # 중복 방지
+                                if file_data not in st.session_state.documents:
                                     st.session_state.documents.append(file_data)
-                        
-                        # 업로드된 문서 테이블 표시
+
+                        # 업로드된 문서 테이블 표시 (폼 밖으로 이동)
+                        st.markdown("---")
+                        st.subheader("업로드된 문서")
                         documents_df = pd.DataFrame(
                             st.session_state.documents if st.session_state.documents else [],
-                            columns=['파일명', '파일 유형', '다운로드']
+                            columns=['파일명', '파일 유형']
                         )
                         for idx, doc in documents_df.iterrows():
-                            if st.button("다운로드", key=f"download_doc_{idx}"):
-                                st.download_button(
-                                    label="다운로드",
-                                    data=doc['content'],
-                                    file_name=doc['filename'],
-                                    mime=doc['file_type']
-                                )
+                            st.download_button(
+                                label=f"다운로드 {doc['파일명']}",
+                                data=doc['content'],
+                                file_name=doc['파일명'],
+                                mime=doc['file_type'],
+                                key=f"download_doc_{idx}"
+                            )
                         if st.session_state.documents:
                             st.write(f"**현재 {len(st.session_state.documents)}개의 문서가 등록되어 있습니다.**")
                     st.markdown("---")
-            
+
                 # SPARE PART 사양
                 if fields_config.get('has_spare_part_specs', True):
                     with st.expander(get_translation('spare_part_specs'), expanded=False):
@@ -2103,7 +2384,7 @@ else:
                         if st.session_state.spare_part_specs:
                             st.write(f"**현재 {len(st.session_state.spare_part_specs)}개의 SPARE PART가 등록되어 있습니다.**")
                     st.markdown("---")
-            
+
                 # 스크류 사양 (사출기만)
                 if fields_config.get('has_screw_specs', False):
                     with st.expander(get_translation('screw_specs'), expanded=False):
@@ -2139,7 +2420,7 @@ else:
                         with col_data4:
                             st.session_state.screw_specs['screw_type_wear'] = st.text_input(
                                 "내마모성 SCREW 규격",
-                                value=st.session_state.screw_specs.get('screw_type_wear', '내 마모성 SCREW'),
+                                value=st.session_state.screw_specs.get('screw_type_wear', '내마모성 SCREW'),
                                 key="screw_spec_wear"
                             )
                         with col_data5:
@@ -2149,10 +2430,10 @@ else:
                                 key="applicable_wear"
                             )
                         st.markdown("---")
-                    
+
                         st.markdown("###### 2) 일반용 SCREW")
                         st.session_state.screw_specs['general_cycle_df'] = st.data_editor(
-                            pd.DataFrame(st.session_state.screw_specs.get('general_cycle', [])),
+                            pd.DataFrame(st.session_state.screw_specs.get('general_cycle', [{'해당 사양': '교체 주기 (월)', 'A': '5', 'B': '5', 'C': '3', 'D': '3'}])),
                             key="general_screw_cycle_editor",
                             hide_index=True,
                             num_rows="dynamic",
@@ -2167,10 +2448,10 @@ else:
                             width='stretch'
                         )
                         st.session_state.screw_specs['general_cycle'] = st.session_state.screw_specs['general_cycle_df'].to_dict('records')
-                    
+
                         st.markdown("###### 3) 내마모성 SCREW")
                         st.session_state.screw_specs['wear_resistant_cycle_df'] = st.data_editor(
-                            pd.DataFrame(st.session_state.screw_specs.get('wear_resistant_cycle', [])),
+                            pd.DataFrame(st.session_state.screw_specs.get('wear_resistant_cycle', [{'해당 사양': '교체 주기 (월)', 'A': '10', 'B': '10', 'C': '5', 'D': '5'}])),
                             key="wear_resistant_screw_cycle_editor",
                             hide_index=True,
                             num_rows="dynamic",
@@ -2186,14 +2467,14 @@ else:
                         )
                         st.session_state.screw_specs['wear_resistant_cycle'] = st.session_state.screw_specs['wear_resistant_cycle_df'].to_dict('records')
                     st.markdown("---")
-            
+
                 # 작동유 사양
                 if fields_config.get('has_oil_specs', True):
                     with st.expander(get_translation('oil_specs'), expanded=False):
                         st.markdown(f"**{get_translation('add_row_instruction')}**")
-                    
+    
                         cols_tables_and_note = st.columns([7, 3])
-                    
+    
                         with cols_tables_and_note[0]:
                             oil_df = pd.DataFrame(
                                 st.session_state.oil_specs if st.session_state.oil_specs else [],
@@ -2215,7 +2496,7 @@ else:
                                 get_translation('col_maintenance_cycle'): '교체 주기'
                             }).to_dict('records')
                             st.write(f"**현재 {len(st.session_state.oil_specs)}개의 작동유 항목이 등록되어 있습니다.**")
-                    
+    
                         with cols_tables_and_note[1]:
                             st.markdown("###### 작동유 점도 측정 방법")
                             note_text = """
@@ -2227,23 +2508,18 @@ else:
 """
                             st.markdown(note_text)
                     st.markdown("---")
-            
+
                 # ========== 동적으로 추가된 커스텀 섹션들 ==========
-                # 기본 섹션 목록
                 default_sections = ['has_accessory_specs', 'has_spare_part_specs', 'has_screw_specs', 'has_oil_specs']
-            
-                # fields_config에서 커스텀 섹션 찾기
+
                 for config_key, config_value in fields_config.items():
                     if config_key.startswith('has_') and config_value == True and config_key not in default_sections:
-                        section_key = config_key.replace('has_', '')  # 먼저 section_key 계산
-        
-                        # field_definitions에서 라벨 찾기 (prefix 제거 후 매칭)
+                        section_key = config_key.replace('has_', '')
                         all_fields = get_field_definitions()
                         field_def = next((f for f in all_fields if f['field_key'] == section_key), None)
-        
+
                         if field_def:
                             field_label = field_def['field_label']
-            
                             with st.expander(f"{field_label}", expanded=False):
                                 custom_section_value = st.text_area(
                                     f"{field_label} 내용 입력",
@@ -2255,55 +2531,43 @@ else:
                                 st.session_state.custom_sections[section_key] = custom_section_value
                             st.markdown("---")
                         else:
-                            # 필드 정의가 없을 때 경고 (옵션: 사용자에게 피드백)
                             st.warning(f"커스텀 섹션 '{section_key}'의 정의를 찾을 수 없습니다. 관리자에서 확인하세요.")
-            
+
                 # 기타사항 및 이미지 업로드
                 st.session_state.other_notes = st.text_area(get_translation('other_notes'), value=st.session_state.get('other_notes', ''), key="add_other_notes")
                 uploaded_images = st.file_uploader(get_translation('upload_image'), type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key="add_eq_images")
-            
+
                 if fields_config.get('has_oil_specs', True):
                     st.markdown("**1년 경과 후 사후관리 방안:**")
                     st.markdown("*아래에 내용을 작성하세요. 줄바꿈이 자동으로 적용됩니다.*")
                     st.session_state.oil_aftercare = st.text_area("사후관리 내용", value=st.session_state.get('oil_aftercare', ''), key="add_oil_aftercare", height=100, label_visibility="collapsed")
-            
-                # 설비 추가 최종 제출 버튼
+    
                 if st.form_submit_button(get_translation('add_equipment_button'), type="primary"):
-                    image_urls_str = upload_images(uploaded_images) if uploaded_images else ""
-                
-                    if factory_id and name and model:
-                        # 문서 업로드 (부속기기 관련 문서만 처리)
-                        document_urls = []
-                        if uploaded_documents:
-                            for doc in uploaded_documents:
-                                url = upload_document_to_supabase(doc)
-                                if url:
-                                    document_urls.append(url)
-                        
-                        # details_dict 구성 (공통 필드 + 특화 필드 + 커스텀 섹션)
+                    if not selected_template_name:
+                        st.info("👆 먼저 설비 종류를 선택해주세요.")
+                    elif not name or not model:
+                        st.error("필수 정보를 모두 입력해주세요: 설비명, 모델")
+                    else:
                         details_dict = {
                             'product_name': product_name,
                             'maker': maker,
                             'serial_number': serial_number,
-                            'production_date': str(production_date) if production_date else None,
+                            'production_date': production_date.isoformat() if production_date else None,
                             'acquisition_cost': acquisition_cost,
-                            'acquisition_date': str(acquisition_date) if acquisition_date else None,
+                            'acquisition_date': acquisition_date.isoformat() if acquisition_date else None,
                             'acquisition_basis': acquisition_basis,
-                            'purchase_date': str(purchase_date) if purchase_date else None,
+                            'purchase_date': purchase_date.isoformat() if purchase_date else None,
                             'installation_location': installation_location,
+                            'equipment_grade': equipment_grade,
                             'motor_capacity': motor_capacity,
                             'heater_capacity': heater_capacity,
                             'total_weight': total_weight,
                             'other_notes': st.session_state.other_notes,
-                            'fields_config': fields_config,  # fields_config 추가
-                            'document_urls': ','.join(document_urls) if document_urls else '',  # 문서 URL 추가
-                            **specific_fields_data,  # 특화 필드
-                            **st.session_state.custom_sections  # 커스텀 섹션
+                            **specific_fields_data
                         }
-                    
-                        # 스크류 사양 (있을 경우만)
+
                         screw_specs_to_add = None
-                        if fields_config.get('has_screw_specs', False):
+                        if selected_template and fields_config.get('has_screw_specs', False):
                             screw_specs_to_add = {
                                 'material_spec_description': st.session_state.screw_specs.get('material_spec_description', ''),
                                 'screw_type_general': st.session_state.screw_specs.get('screw_type_general', ''),
@@ -2313,37 +2577,33 @@ else:
                                 'general_cycle': st.session_state.screw_specs.get('general_cycle', []),
                                 'wear_resistant_cycle': st.session_state.screw_specs.get('wear_resistant_cycle', [])
                             }
-                    
-                        # 작동유 사양 (있을 경우만)
-                        oil_specs_to_add = []
-                        if fields_config.get('has_oil_specs', True):
-                            oil_specs_to_add = st.session_state.oil_specs + [
-                                {'notes': '1년 경과 후 사후관리 방안'},
-                                {'aftercare': st.session_state.oil_aftercare}
-                            ]
-                    
+
                         success, message = add_equipment(
-                            factory_id=factory_id,
+                            factory_id=st.session_state.current_factory['id'],
                             name=name,
+                            product_name=product_name,
+                            maker=maker,
                             model=model,
-                            equipment_type=selected_template['name'],
                             details_dict=details_dict,
-                            accessory_specs=st.session_state.accessory_specs if fields_config.get('has_accessory_specs', True) else [],
-                            spare_part_specs=st.session_state.spare_part_specs if fields_config.get('has_spare_part_specs', True) else [],
+                            accessory_specs=st.session_state.accessory_specs,
+                            spare_part_specs=st.session_state.spare_part_specs,
                             documents=st.session_state.documents,
                             screw_specs=screw_specs_to_add,
-                            oil_specs=oil_specs_to_add,
-                            image_urls=image_urls_str
+                            oil_specs=st.session_state.oil_specs,
+                            status=get_translation('normal'),  # 수정: 'active' -> get_translation('normal')
+                            uploaded_images=uploaded_images,
+                            uploaded_documents=uploaded_documents,
+                            oil_notes=st.session_state.other_notes,
+                            oil_aftercare=st.session_state.oil_aftercare,
+                            selected_template=selected_template  # 템플릿 전달
                         )
-                    
                         if success:
-                            reset_add_equipment_form_state()  # 기존 리셋 함수 (필요 시)
+                            reset_add_equipment_form_state()
+                            st.cache_data.clear()  # 수정: 캐시 갱신
                             st.success("설비가 성공적으로 추가되었습니다. 입력 값이 유지됩니다. 초기화 버튼으로 리셋하세요.")
-                            st.rerun()  # rerun으로 새로고침, 값 유지
+                            st.rerun()
                         else:
                             st.error(f"설비 추가 실패: {message}")
-                    else:
-                        st.error("필수 정보를 모두 입력해주세요: 설비명, 모델")
         else:
             st.info("👆 먼저 설비 종류를 선택해주세요.")
 
@@ -2385,7 +2645,31 @@ else:
                             get_translation('maintenance_time'),
                             value=time(datetime.now().hour, datetime.now().minute)
                         )
-                    cost = st.number_input("정비 비용", min_value=0.0, format="%.2f", key="add_log_cost")
+                    
+                    # 화폐 단위 선택 (USD 추가)
+                    currency_options = {
+                        f"{get_translation('currency_krw')} (₩)": 'KRW',
+                        f"{get_translation('currency_vnd')} (₫)": 'VND',
+                        f"{get_translation('currency_thb')} (฿)": 'THB',
+                        f"{get_translation('currency_mxn')} (MX$)": 'MXN',
+                        f"{get_translation('currency_usd')} ($)": 'USD'
+                    }
+                    selected_currency_label = st.selectbox(
+                        get_translation('select_currency'),
+                        options=list(currency_options.keys()),
+                        key='add_log_currency_select'
+                    )
+                    currency = currency_options[selected_currency_label]
+                    symbol = {'KRW': '₩', 'VND': '₫', 'THB': '฿', 'MXN': 'MX$', 'USD': '$'}[currency]
+                    
+                    # 비용 입력: label에 선택된 화폐 단위 표시
+                    cost = st.number_input(
+                        f"{get_translation('maintenance_cost')}",
+                        min_value=0.0,
+                        format="%.2f",
+                        key="add_log_cost"
+                    )
+                    
                     uploaded_images = st.file_uploader(
                         get_translation('upload_image'),
                         type=['png', 'jpg', 'jpeg'],
@@ -2394,8 +2678,8 @@ else:
                     submitted = st.form_submit_button(get_translation('add_log_button'))
                     if submitted:
                         image_urls = upload_images(uploaded_images) if uploaded_images else None
-                        add_log(selected_eq_id, engineer, action, notes, maintenance_date, maintenance_time, image_urls, cost, action_category)
-                        st.success("정비 이력이 성공적으로 추가되었습니다.")
+                        add_log(selected_eq_id, engineer, action, notes, maintenance_date, maintenance_time, image_urls, cost, action_category, currency=currency)
+                        st.success(get_translation('log_added_success'))
                         st.rerun()
 
 # ------------------------ 정비 이력 확인 ------------------------
@@ -2419,6 +2703,8 @@ else:
                     logs_df = pd.DataFrame(logs)
                     logs_df['maintenance_date'] = pd.to_datetime(logs_df['maintenance_date']).dt.strftime('%Y-%m-%d %H:%M')
                     logs_df['equipment_name'] = logs_df['equipment'].apply(lambda x: x['name'])
+                    # 비용과 화폐 단위 결합, 천 단위 구분 기호 추가
+                    logs_df['formatted_cost'] = logs_df.apply(lambda x: f"{x['cost']:,.2f} {x['currency']}", axis=1)
                     logs_df = logs_df.rename(columns={
                         'maintenance_date': get_translation('maintenance_date'),
                         'engineer': get_translation('col_engineer'),
@@ -2426,28 +2712,47 @@ else:
                         'notes': get_translation('col_notes'),
                         'image_urls': get_translation('col_image_urls'),
                         'id': get_translation('col_log_id'),
-                        'cost': "정비 비용"
+                        'formatted_cost': get_translation('maintenance_cost')
                     })
 
                     logs_df[get_translation('maintenance_date')] = logs_df[get_translation('maintenance_date')].fillna('')
                     logs_df[get_translation('col_engineer')] = logs_df[get_translation('col_engineer')].fillna('')
                     logs_df[get_translation('col_action')] = logs_df[get_translation('col_action')].fillna('')
                     logs_df[get_translation('col_notes')] = logs_df[get_translation('col_notes')].fillna('')
-                    logs_df["정비 비용"] = logs_df["정비 비용"].fillna(0.0)
+                    logs_df[get_translation('maintenance_cost')] = logs_df[get_translation('maintenance_cost')].fillna('0.00')
 
                     log_search = st.text_input("상세 이력 검색", placeholder="일자, 작업자, 내용으로 검색...", key="view_log_detail_search")
+                    
+                    # 기간 설정 추가
+                    col_start, col_end = st.columns(2)
+                    with col_start:
+                        start_date = st.date_input("시작 날짜", value=None, key="log_start_date")
+                    with col_end:
+                        end_date = st.date_input("끝 날짜", value=None, key="log_end_date")
+                    
+                    # 데이터 필터링 (검색 + 기간)
+                    filtered_logs_df = logs_df.copy()
                     if log_search:
-                        logs_df = logs_df[
-                            logs_df[get_translation('maintenance_date')].str.contains(log_search, case=False, na=False) |
-                            logs_df[get_translation('col_engineer')].str.contains(log_search, case=False, na=False) |
-                            logs_df[get_translation('col_action')].str.contains(log_search, case=False, na=False) |
-                            logs_df[get_translation('col_notes')].str.contains(log_search, case=False, na=False)
+                        filtered_logs_df = filtered_logs_df[
+                            filtered_logs_df[get_translation('maintenance_date')].str.contains(log_search, case=False, na=False) |
+                            filtered_logs_df[get_translation('col_engineer')].str.contains(log_search, case=False, na=False) |
+                            filtered_logs_df[get_translation('col_action')].str.contains(log_search, case=False, na=False) |
+                            filtered_logs_df[get_translation('col_notes')].str.contains(log_search, case=False, na=False)
                         ]
 
-                    if log_search and logs_df.empty:
-                        st.warning("검색 조건에 맞는 이력이 없습니다.")
+                    # 기간 필터 적용
+                    if start_date or end_date:
+                        filtered_logs_df['parsed_date'] = pd.to_datetime(filtered_logs_df[get_translation('maintenance_date')])
+                        if start_date:
+                            filtered_logs_df = filtered_logs_df[filtered_logs_df['parsed_date'] >= pd.to_datetime(start_date)]
+                        if end_date:
+                            filtered_logs_df = filtered_logs_df[filtered_logs_df['parsed_date'] <= pd.to_datetime(end_date)]
+                        filtered_logs_df = filtered_logs_df.drop(columns=['parsed_date'])
+
+                    if (log_search or start_date or end_date) and filtered_logs_df.empty:
+                        st.warning("검색 또는 기간 조건에 맞는 이력이 없습니다.")
                     else:
-                        st.dataframe(logs_df[[get_translation('maintenance_date'), get_translation('col_engineer'), get_translation('col_action'), get_translation('col_notes'), "정비 비용", get_translation('col_image_urls'), get_translation('col_log_id')]], width='stretch')
+                        st.dataframe(filtered_logs_df[[get_translation('maintenance_date'), get_translation('col_engineer'), get_translation('col_action'), get_translation('col_notes'), get_translation('maintenance_cost'), get_translation('col_image_urls'), get_translation('col_log_id')]], width='stretch')
 
                     log_options = {f"날짜: {log['maintenance_date']}, 작업: {log['action']}": log['id'] for log in logs}
                     selected_log_id_view = st.selectbox(get_translation('view_detail_log'), options=[''] + list(log_options.keys()), key='view_detail_log_select')
@@ -2462,7 +2767,8 @@ else:
                                 st.write(f"**{get_translation('engineer_name')}:** {selected_log_data['engineer']}")
                                 st.write(f"**{get_translation('maintenance_action')}:** {selected_log_data['action']}")
                                 st.write(f"**{get_translation('notes')}:** {selected_log_data['notes']}")
-                                st.write(f"**정비 비용:** {selected_log_data.get('cost', 0.0)}")
+                                # 천 단위 구분 기호 추가
+                                st.write(f"**{get_translation('maintenance_cost')}:** {selected_log_data['cost']:,.2f} {selected_log_data['currency']}")
 
                                 if selected_log_data.get('image_urls'):
                                     st.subheader(get_translation('attachments'))
@@ -2474,22 +2780,27 @@ else:
                                 else:
                                     st.info(get_translation('no_attachments'))
 
-                    if not logs_df.empty:
+                    if not filtered_logs_df.empty:
                         st.subheader("정비 비용 추이 분석")
-                        logs_df['날짜'] = pd.to_datetime(logs_df[get_translation('maintenance_date')]).dt.date
-                        cost_trend = logs_df.groupby('날짜')['정비 비용'].sum().reset_index()
+                        filtered_logs_df['날짜'] = pd.to_datetime(filtered_logs_df[get_translation('maintenance_date')]).dt.date
+                        # 화폐별로 그룹화하여 비용 합계 계산
+                        cost_trend = filtered_logs_df.groupby(['날짜', 'currency'])['cost'].sum().reset_index()
                         cost_trend['날짜'] = pd.to_datetime(cost_trend['날짜'])
                         cost_trend = cost_trend.sort_values('날짜')
                         st.dataframe(cost_trend, width='stretch')
 
-                        chart = alt.Chart(cost_trend).mark_line().encode(
-                            x=alt.X('날짜:T', title=get_translation('maintenance_date')),
-                            y=alt.Y('정비 비용:Q', title='정비 비용'),
-                            tooltip=['날짜', '정비 비용']
-                        ).properties(
-                            width='container'
-                        )
-                        st.altair_chart(chart)
+                        # 화폐별로 별도 그래프 생성
+                        for currency in cost_trend['currency'].unique():
+                            currency_data = cost_trend[cost_trend['currency'] == currency]
+                            chart = alt.Chart(currency_data).mark_bar(color='skyblue').encode(
+                                x=alt.X('날짜:T', title=get_translation('maintenance_date')),
+                                y=alt.Y('cost:Q', title=f"{get_translation('maintenance_cost')} ({currency})"),
+                                tooltip=['날짜', 'cost', 'currency']
+                            ).properties(
+                                width='container',
+                                title=f"{get_translation('maintenance_cost')} ({currency})"
+                            )
+                            st.altair_chart(chart)
                     else:
                         st.info("분석할 정비 이력이 없습니다.")
 
@@ -2547,8 +2858,163 @@ else:
                     hide_index=True
                 )
 
-# ------------------------ 관리자 모드 ------------------------
+# ------------------------ 설비 예방 정비 ------------------------
     with tabs[5]:
+        st.header(get_translation('preventive_maintenance'))
+        equipment_list = get_equipment(factory_id)
+        if not equipment_list:
+            st.warning(get_translation('no_equipment_registered'))
+        else:
+            eq_options = {eq['name']: eq['id'] for eq in equipment_list}
+            selected_eq_name = st.selectbox(get_translation('select_equipment'), options=list(eq_options.keys()), key='preventive_eq_select')
+            selected_eq_id = eq_options.get(selected_eq_name, None)
+
+            if selected_eq_id:
+                # 예방 정비 항목 조회
+                preventive_items = get_preventive_maintenance(equipment_id=selected_eq_id)
+                if not preventive_items:
+                    st.info(get_translation('no_maintenance_items'))
+                else:
+                    # 다가오는 정비 항목 계산
+                    current_date = datetime.now()
+                    items_df = pd.DataFrame(preventive_items)
+                    items_df['last_maintenance_date'] = pd.to_datetime(items_df['last_maintenance_date'])
+                    items_df['next_maintenance_date'] = items_df['last_maintenance_date'] + pd.to_timedelta(items_df['cycle_days'], unit='D')
+                    items_df['days_remaining'] = (items_df['next_maintenance_date'] - current_date).dt.days
+                    items_df['created_at'] = pd.to_datetime(items_df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
+                    # Handle missing columns gracefully
+                    items_df['estimated_cost'] = items_df.get('estimated_cost', 0.0)
+                    items_df['estimated_currency'] = items_df.get('estimated_currency', 'KRW')
+                    items_df['notification_threshold'] = items_df.get('notification_threshold', 7)
+
+                    # 다가오는 정비 항목 표시
+                    st.subheader(get_translation('upcoming_maintenance'))
+                    upcoming_items = items_df[items_df['days_remaining'] <= items_df['notification_threshold']]
+                    if upcoming_items.empty:
+                        st.info(get_translation('no_upcoming_maintenance'))
+                    else:
+                        upcoming_df = upcoming_items[[
+                            'maintenance_item', 'cycle_days', 'description', 'next_maintenance_date', 'days_remaining', 'notification_threshold', 'estimated_cost', 'estimated_currency'
+                        ]].rename(columns={
+                            'maintenance_item': get_translation('maintenance_item'),
+                            'cycle_days': get_translation('cycle_days'),
+                            'description': get_translation('description'),
+                            'next_maintenance_date': '다음 정비일',
+                            'days_remaining': get_translation('days_remaining'),
+                            'notification_threshold': '알림 기준(일)',
+                            'estimated_cost': '예상 비용',
+                            'estimated_currency': '화폐'
+                        })
+                        upcoming_df['다음 정비일'] = upcoming_df['다음 정비일'].dt.strftime('%Y-%m-%d')
+                        def highlight_row(row):
+                            return ['background-color: #ffcccc' if row[get_translation('days_remaining')] <= row['알림 기준(일)'] else '' for _ in row]
+                        st.dataframe(upcoming_df.style.apply(highlight_row, axis=1), width='stretch')
+
+                    # 전체 항목 및 이력 표시
+                    st.subheader("모든 예방 정비 항목")
+                    for item in preventive_items:
+                        with st.expander(f"{item['maintenance_item']} ({item['cycle_days']}일) - 최근 정비일: {item['last_maintenance_date'] or '없음'} - 예상 비용: {item.get('estimated_cost', 0.0)} {item.get('estimated_currency', 'KRW')}"):
+                            st.write(f"설명: {item['description'] or '없음'}")
+                            st.write(f"알림 기준: {item.get('notification_threshold', 7)}일")
+
+                            # 정비 이력 표시
+                            st.subheader("정비 이력")
+                            related_logs = get_preventive_maintenance_logs(preventive_maintenance_id=item['id'])
+                            if related_logs:
+                                logs_df = pd.DataFrame(related_logs)[['maintenance_date', 'engineer', 'action', 'notes', 'cost', 'currency']]
+                                logs_df['maintenance_date'] = pd.to_datetime(logs_df['maintenance_date']).dt.strftime('%Y-%m-%d %H:%M')
+                                logs_df['cost_diff'] = logs_df['cost'] - item.get('estimated_cost', 0.0)  # 예상 vs 실제 비용 차이
+                                st.dataframe(logs_df.rename(columns={
+                                    'maintenance_date': '정비 날짜',
+                                    'engineer': '엔지니어',
+                                    'action': '작업 내용',
+                                    'notes': '비고',
+                                    'cost': '실제 비용',
+                                    'currency': '화폐',
+                                    'cost_diff': '비용 차이 (실제 - 예상)'
+                                }), width='stretch')
+                            else:
+                                st.info("이 항목에 대한 정비 이력이 없습니다.")
+
+                            # 정비 완료 입력 폼
+                            with st.form(f"complete_maintenance_{item['id']}", clear_on_submit=True):
+                                st.info(f"예상 비용: {item.get('estimated_cost', 0.0)} {item.get('estimated_currency', 'KRW')}")
+                                engineer = st.text_input(get_translation('engineer_name'), value="시스템 자동", key=f"engineer_{item['id']}")
+                                action = st.text_input(get_translation('maintenance_action'), value=f"예방 정비: {item['maintenance_item']}", key=f"action_{item['id']}")
+                                notes = st.text_area(get_translation('notes'), placeholder="정비 세부사항 입력...", key=f"notes_{item['id']}")
+                                maintenance_date = st.date_input(get_translation('maintenance_date'), value=date.today(), key=f"date_{item['id']}")
+                                maintenance_time = st.time_input(get_translation('maintenance_time'), value=time(0, 0), key=f"time_{item['id']}")
+                                cost = st.number_input(get_translation('maintenance_cost'), min_value=0.0, value=float(item.get('estimated_cost', 0.0)), step=0.01, key=f"cost_{item['id']}")
+                                currency = st.selectbox(get_translation('select_currency'), ['KRW', 'USD', 'VND', 'THB', 'MXN'], index=['KRW', 'USD', 'VND', 'THB', 'MXN'].index(item.get('estimated_currency', 'KRW')), key=f"currency_{item['id']}")
+                                uploaded_images = st.file_uploader(get_translation('upload_image'), type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key=f"images_{item['id']}")
+                            
+                                if st.form_submit_button("정비 완료"):
+                                    # 이미지 업로드 (가정: upload_images 함수가 정의됨)
+                                    image_urls = upload_images(uploaded_images) if uploaded_images else None
+                                    # 정비 로그 추가
+                                    add_preventive_maintenance_log(
+                                        preventive_maintenance_id=item['id'],
+                                        equipment_id=selected_eq_id,
+                                        engineer=engineer,
+                                        action=action,
+                                        notes=notes,
+                                        maintenance_date=maintenance_date,
+                                        maintenance_time=maintenance_time,
+                                        cost=cost,
+                                        currency=currency,
+                                        image_urls=image_urls
+                                    )
+                                    # last_maintenance_date 및 updated_at 갱신
+                                    update_data = {
+                                        'last_maintenance_date': datetime.combine(maintenance_date, maintenance_time).isoformat(),
+                                        'updated_at': datetime.now().isoformat()
+                                    }
+                                    supabase.table('preventive_maintenance').update(update_data).eq('id', item['id']).execute()
+                                    st.success(f"{item['maintenance_item']} 정비가 완료되었습니다. 다음 주기가 갱신되었습니다.")
+                                    st.cache_data.clear()
+                                    st.rerun()
+
+                # 예방 정비 항목 추가
+                with st.form("add_preventive_form", clear_on_submit=True):
+                    maintenance_item = st.text_input(get_translation('maintenance_item'), placeholder="예: 오일 교체")
+                    cycle_days = st.number_input(get_translation('cycle_days'), min_value=1, value=30, step=1)
+                    description = st.text_area(get_translation('description'), placeholder="정비 항목에 대한 설명...")
+                    last_maintenance_date = st.date_input("최근 정비일", value=None, key="last_maintenance_date")
+                    notification_threshold = st.number_input("알림 기준 (일)", min_value=0, value=7, step=1)
+                    estimated_cost = st.number_input("예상 비용", min_value=0.0, value=0.0, step=0.01)
+                    estimated_currency = st.selectbox("예상 비용 화폐 단위", ['KRW', 'USD', 'VND', 'THB', 'MXN'], index=0)
+                    submitted = st.form_submit_button(get_translation('add_maintenance_item'))
+                    if submitted:
+                        if maintenance_item and cycle_days:
+                            add_preventive_maintenance(
+                                selected_eq_id,
+                                maintenance_item,
+                                cycle_days,
+                                description,
+                                last_maintenance_date,
+                                notification_threshold,
+                                estimated_cost,
+                                estimated_currency
+                            )
+                            st.success(get_translation('add_item_success'))
+                            st.rerun()
+                        else:
+                            st.error("정비 항목과 주기를 입력해주세요.")
+
+                # 예방 정비 항목 삭제 (소프트 삭제)
+                if preventive_items:
+                    item_options = {f"{item['maintenance_item']} ({item['cycle_days']}일)": item['id'] for item in preventive_items if item.get('is_active', True)}
+                    selected_item_id = st.selectbox(get_translation('delete_maintenance_item'), options=[''] + list(item_options.keys()), key='delete_preventive_item')
+                    if selected_item_id:
+                        if st.button("삭제 확인"):
+                            # 소프트 삭제: is_active를 FALSE로 설정
+                            supabase.table('preventive_maintenance').update({'is_active': False, 'updated_at': datetime.now().isoformat()}).eq('id', item_options[selected_item_id]).execute()
+                            st.success(get_translation('delete_item_success'))
+                            st.cache_data.clear()
+                            st.rerun()
+
+# ------------------------ 관리자 모드 ------------------------
+    with tabs[6]:
         st.header(get_translation('admin_mode'))
         if 'admin_authenticated' not in st.session_state:
             st.session_state.admin_authenticated = False
@@ -2570,7 +3036,8 @@ else:
                 get_translation('update_delete_equipment'),
                 "⚙️ 설비 템플릿 관리",  # 새 탭
                 get_translation('update_log_admin'),
-                get_translation('update_status_admin')
+                get_translation('update_status_admin'),
+                get_translation('preventive_maintenance_admin')
             ])
 
             # 공장 추가
@@ -2649,9 +3116,9 @@ else:
                             index=list(template_options.keys()).index(equipment_type) if equipment_type in template_options else 0,
                             key="update_equipment_type"
                         )
-
+    
                         template = get_template_by_name(selected_equipment_type)
-
+    
                         # 세션 상태 초기화 (작동유 관련)
                         if 'edit_oil_specs' not in st.session_state:
                             st.session_state.edit_oil_specs = eq_data.get('oil_specs', []) or [{'구분': '', '적용 작동유 SPCE': '', '교체 주기': ''}]
@@ -2661,7 +3128,7 @@ else:
                             st.session_state.edit_oil_aftercare = eq_data.get('oil_aftercare', '')
                         if 'edit_documents' not in st.session_state:
                             st.session_state.edit_documents = eq_data.get('documents', []) or []
-
+    
                         # details에서 특화 필드 추출
                         details_json = eq_data.get('details', '{}')
                         if isinstance(details_json, str):
@@ -2671,7 +3138,7 @@ else:
                                 extra_fields = {}
                         else:
                             extra_fields = details_json if details_json else {}
-
+    
                         with st.form("update_equipment_form"):
 
                             # 공통 필드
@@ -2682,7 +3149,7 @@ else:
                                 product_name = st.text_input(get_translation('product_name'), value=eq_data.get('product_name', ''), key="update_eq_product_name")
                             with col3:
                                 maker = st.text_input(get_translation('maker'), value=eq_data.get('maker', ''), key="update_eq_maker")
-
+    
                             col4, col5, col6 = st.columns(3)
                             with col4:
                                 model = st.text_input(get_translation('model'), value=eq_data['model'], key="update_eq_model")
@@ -2729,12 +3196,12 @@ else:
 
                             col16, col17, col18 = st.columns(3)
                             with col16:
-                                status = st.radio(get_translation('status'), [get_translation('normal'), get_translation('faulty'), get_translation('sold')], index=0 if eq_data['status'] == '정상' else 1 if eq_data['status'] == '고장' else 2)
+                                status = st.radio(get_translation('status'), [get_translation('normal'), get_translation('faulty'), get_translation('sold')], index=0 if eq_data['status'] == get_translation('normal') else 1 if eq_data['status'] == get_translation('faulty') else 2)
                             with col17:
                                 st.empty()  # 빈 공간
                             with col18:
                                 st.empty()  # 빈 공간
-
+    
                             st.markdown("---")
 
                             # 특화 필드
@@ -2750,7 +3217,8 @@ else:
                                             idx = i + j
                                             if idx < len(specific_fields):
                                                 field_key = specific_fields[idx]
-                                                field_def = FIELD_DEFINITIONS.get(field_key, {'label': field_key, 'type': 'text'})
+                                                field_defs = load_field_definitions()
+                                                field_def = field_defs.get(field_key, {'label': field_key, 'type': 'text'})
                                                 with cols[j]:
                                                     translated_label = get_translation(field_def['label'])
                                                     if field_def['type'] == 'text':
@@ -2771,9 +3239,9 @@ else:
                                                             value=get_date_value(extra_fields.get(field_key)),
                                                             key=f"update_spec_{field_key}"
                                                         )
-
+    
                             st.markdown("---")
-
+    
                             # 부속기기 사양
                             st.markdown(f"##### {get_translation('accessory_specs')}")
                             if len(st.session_state.edit_accessory_specs) > 0:
@@ -2830,9 +3298,9 @@ else:
                                     get_translation('col_maintenance_cycle'): '교체 주기',
                                     get_translation('col_replacement_date'): '교체 일자'
                                 }).to_dict('records')
-
+    
                             st.markdown("---")
-
+    
                             # 문서
                             st.markdown(f"##### {get_translation('documents')}")
                             if len(st.session_state.edit_documents) > 0:
@@ -2858,7 +3326,7 @@ else:
                                     get_translation('col_lubrication_std'): '윤활 기준표',
                                     get_translation('col_url'): 'url'  # URL 컬럼 복원
                                 }).to_dict('records')
-
+    
                             # 문서 첨부
                             uploaded_documents = st.file_uploader(
                                 get_translation('upload_documents'),
@@ -2878,7 +3346,7 @@ else:
                                         'file_type': uploaded_file.type
                                     }
                                     if file_data['url'] and not any(d['기술 자료명'] == file_data['기술 자료명'] and d['url'] == file_data['url'] for d in st.session_state.edit_documents):
-                                                st.session_state.edit_documents.append(file_data)
+                                        st.session_state.edit_documents.append(file_data)
                             st.markdown("---")
 
                             # 스크류 사양 (사출기만)
@@ -2925,7 +3393,7 @@ else:
                                         value=st.session_state.edit_screw_specs.get('applicable_wear', ''),
                                         key="update_applicable_wear"
                                     )
-
+    
                                 st.markdown("---")
                                 st.markdown("###### 2) 일반용 SCREW")
                                 st.session_state.edit_screw_specs['general_cycle_df'] = st.data_editor(
@@ -2958,7 +3426,7 @@ else:
                                     width='stretch'
                                 )
                                 st.markdown("---")
-
+    
                             # 작동유 사양 (강제 렌더링)
                             st.markdown(f"##### {get_translation('oil_specs')}")
                             if len(st.session_state.edit_oil_specs) > 0:
@@ -2996,7 +3464,7 @@ else:
                                     get_translation('col_applicable_oil'): '적용 작동유 SPCE',
                                     get_translation('col_maintenance_cycle'): '교체 주기'
                                 }).to_dict('records')
-
+    
                             st.session_state.edit_oil_notes = st.text_area(
                                 "작동유 점도 측정 방법",
                                 value=st.session_state.edit_oil_notes,
@@ -3013,7 +3481,7 @@ else:
                                 label_visibility="collapsed"
                             )
                             st.markdown("---")
-
+    
                             # 기타사항
                             st.session_state.edit_other_notes = st.text_area(
                                 get_translation('other_notes'),
@@ -3044,7 +3512,7 @@ else:
                                     st.info("등록된 이미지가 없습니다.")
                             else:
                                 st.info("등록된 이미지가 없습니다.")
-
+    
                             uploaded_images = st.file_uploader(
                                 get_translation('upload_image'),
                                 type=['png', 'jpg', 'jpeg'],
@@ -3052,10 +3520,11 @@ else:
                                 key="update_eq_images"
                             )
 
-                            # 제출 및 삭제 버튼
+# 제출 및 삭제 버튼
                             col1, col2 = st.columns(2)
                             with col1:
-                                if st.form_submit_button(get_translation('update_button'), type="primary"):
+                                submit_button = st.form_submit_button(get_translation('update_button'), type="primary")
+                                if submit_button:
                                     details_dict = {
                                         'product_name': product_name,
                                         'maker': maker,
@@ -3075,7 +3544,7 @@ else:
                                     }
 
                                     screw_specs_to_update = None
-                                    if template and fields_config.get('has_screw_specs', False):
+                                    if fields_config.get('has_screw_specs', False):
                                         screw_specs_to_update = {
                                             'material_spec_description': st.session_state.edit_screw_specs.get('material_spec_description', ''),
                                             'screw_type_general': st.session_state.edit_screw_specs.get('screw_type_general', ''),
@@ -3086,12 +3555,13 @@ else:
                                             'wear_resistant_cycle': st.session_state.edit_screw_specs['wear_resistant_cycle_df'].to_dict('records')
                                         }
 
+                                    # 🔥 이미지 URL 처리 수정
                                     final_image_urls = st.session_state.get('current_images_to_keep', [])
                                     if uploaded_images:
                                         new_image_urls = upload_images(uploaded_images)
                                         if new_image_urls:
                                             final_image_urls.extend([url.strip() for url in new_image_urls.split(',') if url.strip()])
-
+    
                                     success, message = update_equipment(
                                         equipment_id=st.session_state.selected_eq_id_admin,
                                         name=name,
@@ -3105,25 +3575,72 @@ else:
                                         screw_specs=screw_specs_to_update,
                                         oil_specs=st.session_state.edit_oil_specs,
                                         status=status,
-                                        uploaded_images=uploaded_images,
+                                        uploaded_images=None,  # 🔥 이미 처리했으므로 None
                                         uploaded_documents=uploaded_documents,
                                         oil_notes=st.session_state.edit_oil_notes,
-                                        oil_aftercare=st.session_state.edit_oil_aftercare
+                                        oil_aftercare=st.session_state.edit_oil_aftercare,
+                                        final_image_urls=final_image_urls  # 🔥 최종 이미지 URL 리스트 전달
                                     )
                                     if success:
+                                        # 세션 상태 초기화
+                                        st.session_state.edit_accessory_specs = []
+                                        st.session_state.edit_spare_part_specs = []
+                                        st.session_state.edit_documents = []
+                                        st.session_state.edit_screw_specs = {
+                                            'material_spec_description': '',
+                                            'screw_type_general': '일반 수지용 SCREW',
+                                            'applicable_general': '',
+                                            'screw_type_wear': '내마모성 SCREW',
+                                            'applicable_wear': '',
+                                            'general_cycle': [{'해당 사양': '교체 주기 (월)', 'A': '5', 'B': '5', 'C': '3', 'D': '3'}],
+                                            'wear_resistant_cycle': [{'해당 사양': '교체 주기 (월)', 'A': '10', 'B': '10', 'C': '5', 'D': '5'}]
+                                        }
+                                        st.session_state.edit_oil_specs = []
+                                        st.session_state.edit_oil_notes = ''
+                                        st.session_state.edit_oil_aftercare = ''
                                         st.session_state.edit_other_notes = ''
                                         if 'current_images_to_keep' in st.session_state:
                                             del st.session_state.current_images_to_keep
                                         st.success("설비 정보가 성공적으로 업데이트되었습니다.")
+                                        st.cache_data.clear()
                                         st.rerun()
                                     else:
                                         st.error(f"설비 업데이트 실패: {message}")
+
                             with col2:
-                                if st.form_submit_button(get_translation('delete_button'), type="primary"):
-                                    delete_equipment(st.session_state.selected_eq_id_admin)
-                                    st.session_state.edit_other_notes = ''
-                                    st.success("설비가 성공적으로 삭제되었습니다.")
-                                    st.rerun()
+                                delete_button = st.form_submit_button(get_translation('delete_button'), type="primary")
+                                if delete_button:
+                                    result = delete_equipment(st.session_state.selected_eq_id_admin)
+                                    if result is None:
+                                        st.error("설비 삭제 실패: 반환값이 없습니다.")
+                                    else:
+                                        success, message = result
+                                        if success:
+                                            # 세션 상태 초기화
+                                            st.session_state.edit_accessory_specs = []
+                                            st.session_state.edit_spare_part_specs = []
+                                            st.session_state.edit_documents = []
+                                            st.session_state.edit_screw_specs = {
+                                                'material_spec_description': '',
+                                                'screw_type_general': '일반 수지용 SCREW',
+                                                'applicable_general': '',
+                                                'screw_type_wear': '내마모성 SCREW',
+                                                'applicable_wear': '',
+                                                'general_cycle': [{'해당 사양': '교체 주기 (월)', 'A': '5', 'B': '5', 'C': '3', 'D': '3'}],
+                                                'wear_resistant_cycle': [{'해당 사양': '교체 주기 (월)', 'A': '10', 'B': '10', 'C': '5', 'D': '5'}]
+                                            }
+                                            st.session_state.edit_oil_specs = []
+                                            st.session_state.edit_oil_notes = ''
+                                            st.session_state.edit_oil_aftercare = ''
+                                            st.session_state.edit_other_notes = ''
+                                            if 'current_images_to_keep' in st.session_state:
+                                                del st.session_state.current_images_to_keep
+                                            st.session_state.selected_eq_id_admin = None
+                                            st.success(message)
+                                            st.cache_data.clear()
+                                            st.rerun()
+                                        else:
+                                            st.error(f"설비 삭제 실패: {message}")
 
             # 설비 템플릿 관리 탭
             with admin_tabs[3]:
@@ -3512,3 +4029,159 @@ else:
                                                 st.rerun()
                                 else:
                                     st.warning("선택한 상태 기록 데이터를 찾을 수 없습니다.")
+
+            # 관리자 모드: 예방 정비 관리 탭
+            with admin_tabs[6]:
+                st.header("예방 정비 관리 (관리자 모드)")
+                equipment_list = get_equipment(factory_id)
+                if not equipment_list:
+                    st.warning("등록된 설비가 없습니다.")
+                else:
+                    # 설비 선택 (모든 설비의 정비 항목 조회 가능)
+                    eq_options = {eq['name']: eq['id'] for eq in equipment_list}
+                    eq_options['모든 설비'] = None  # 모든 설비 선택 옵션 추가
+                    selected_eq_name = st.selectbox("설비 선택", options=list(eq_options.keys()), key='admin_preventive_eq_select')
+                    selected_eq_id = eq_options.get(selected_eq_name, None)
+
+                    # 예방 정비 항목 조회
+                    preventive_items = get_preventive_maintenance(equipment_id=selected_eq_id)
+                    if not preventive_items:
+                        st.info("정비 항목이 없습니다.")
+                    else:
+                        # 다가오는 정비 항목 계산
+                        current_date = datetime.now()
+                        items_df = pd.DataFrame(preventive_items)
+                        items_df['last_maintenance_date'] = pd.to_datetime(items_df['last_maintenance_date'])
+                        items_df['next_maintenance_date'] = items_df['last_maintenance_date'] + pd.to_timedelta(items_df['cycle_days'], unit='D')
+                        items_df['days_remaining'] = (items_df['next_maintenance_date'] - current_date).dt.days
+                        items_df['created_at'] = pd.to_datetime(items_df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
+                        items_df['estimated_cost'] = items_df.get('estimated_cost', 0.0)
+                        items_df['estimated_currency'] = items_df.get('estimated_currency', 'KRW')
+                        items_df['notification_threshold'] = items_df.get('notification_threshold', 7)
+
+                        # 다가오는 정비 항목 표시
+                        st.subheader("다가오는 정비")
+                        upcoming_items = items_df[items_df['days_remaining'] <= items_df['notification_threshold']]
+                        if upcoming_items.empty:
+                            st.info("다가오는 정비가 없습니다.")
+                        else:
+                            upcoming_df = upcoming_items[[
+                                'maintenance_item', 'cycle_days', 'description', 'next_maintenance_date', 'days_remaining', 'notification_threshold', 'estimated_cost', 'estimated_currency'
+                            ]].rename(columns={
+                                'maintenance_item': '정비 항목',
+                                'cycle_days': '주기(일)',
+                                'description': '설명',
+                                'next_maintenance_date': '다음 정비일',
+                                'days_remaining': '남은 일수',
+                                'notification_threshold': '알림 기준(일)',
+                                'estimated_cost': '예상 비용',
+                                'estimated_currency': '화폐'
+                            })
+                            upcoming_df['다음 정비일'] = upcoming_df['다음 정비일'].dt.strftime('%Y-%m-%d')
+                            def highlight_row(row):
+                                return ['background-color: #ffcccc' if row['남은 일수'] <= row['알림 기준(일)'] else '' for _ in row]
+                            st.dataframe(upcoming_df.style.apply(highlight_row, axis=1), width='stretch')
+
+                        # 모든 예방 정비 항목 관리
+                        st.subheader("예방 정비 항목 관리")
+                        for item in preventive_items:
+                            with st.expander(f"{item['maintenance_item']} ({item['cycle_days']}일) - 설비: {item.get('equipment_id')} - 예상 비용: {item.get('estimated_cost', 0.0)} {item.get('estimated_currency', 'KRW')}"):
+                                st.write(f"설명: {item['description'] or '없음'}")
+                                st.write(f"알림 기준: {item.get('notification_threshold', 7)}일")
+                                st.write(f"최근 정비일: {item['last_maintenance_date'] or '없음'}")
+
+                                # 수정 폼
+                                with st.form(f"edit_maintenance_{item['id']}", clear_on_submit=True):
+                                    st.subheader("정비 항목 수정")
+                                    maintenance_item = st.text_input("정비 항목", value=item['maintenance_item'], key=f"edit_item_{item['id']}")
+                                    cycle_days = st.number_input("주기(일)", min_value=1, value=item['cycle_days'], step=1, key=f"edit_cycle_{item['id']}")
+                                    description = st.text_area("설명", value=item['description'] or '', placeholder="정비 항목에 대한 설명...", key=f"edit_desc_{item['id']}")
+                                    last_maintenance_date = st.date_input("최근 정비일", value=pd.to_datetime(item['last_maintenance_date']).date() if item['last_maintenance_date'] else None, key=f"edit_date_{item['id']}")
+                                    notification_threshold = st.number_input("알림 기준 (일)", min_value=0, value=item.get('notification_threshold', 7), step=1, key=f"edit_threshold_{item['id']}")
+                                    estimated_cost = st.number_input("예상 비용", min_value=0.0, value=float(item.get('estimated_cost', 0.0)), step=0.01, key=f"edit_cost_{item['id']}")
+                                    estimated_currency = st.selectbox("예상 비용 화폐 단위", ['KRW', 'USD', 'VND', 'THB', 'MXN'], index=['KRW', 'USD', 'VND', 'THB', 'MXN'].index(item.get('estimated_currency', 'KRW')), key=f"edit_currency_{item['id']}")
+                                    if st.form_submit_button("수정 저장"):
+                                        if maintenance_item and cycle_days:
+                                            update_preventive_maintenance(
+                                                item_id=item['id'],
+                                                maintenance_item=maintenance_item,
+                                                cycle_days=cycle_days,
+                                                description=description,
+                                                last_maintenance_date=last_maintenance_date,
+                                                notification_threshold=notification_threshold,
+                                                estimated_cost=estimated_cost,
+                                                estimated_currency=estimated_currency
+                                            )
+                                            st.success(f"{maintenance_item} 항목이 수정되었습니다.")
+                                            st.rerun()
+                                        else:
+                                            st.error("정비 항목과 주기를 입력해주세요.")
+
+                                # 삭제 버튼 (하드 삭제)
+                                with st.form(f"delete_maintenance_{item['id']}", clear_on_submit=True):
+                                    st.subheader("정비 항목 삭제")
+                                    st.warning(f"'{item['maintenance_item']}' 항목을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")
+                                    confirm_delete = st.checkbox("삭제 확인", key=f"confirm_delete_check_{item['id']}")
+                                    if st.form_submit_button("삭제", type="primary"):
+                                        if confirm_delete:
+                                            try:
+                                                # 관련 정비 이력 삭제 (선택 사항)
+                                                supabase.table('preventive_maintenance_logs').delete().eq('preventive_maintenance_id', item['id']).execute()
+                                                # 예방 정비 항목 하드 삭제
+                                                supabase.table('preventive_maintenance').delete().eq('id', item['id']).execute()
+                                                st.success(f"{item['maintenance_item']} 항목이 삭제되었습니다.")
+                                                st.cache_data.clear()
+                                                st.rerun()
+                                            except Exception as e:
+                                                st.error(f"삭제 실패: {str(e)}")
+                                        else:
+                                            st.error("삭제를 진행하려면 '삭제 확인' 체크박스를 선택해주세요.")
+
+                                # 정비 이력 표시
+                                st.subheader("정비 이력")
+                                related_logs = get_preventive_maintenance_logs(preventive_maintenance_id=item['id'])
+                                if related_logs:
+                                    logs_df = pd.DataFrame(related_logs)[['maintenance_date', 'engineer', 'action', 'notes', 'cost', 'currency']]
+                                    logs_df['maintenance_date'] = pd.to_datetime(logs_df['maintenance_date']).dt.strftime('%Y-%m-%d %H:%M')
+                                    logs_df['cost_diff'] = logs_df['cost'] - item.get('estimated_cost', 0.0)
+                                    st.dataframe(logs_df.rename(columns={
+                                        'maintenance_date': '정비 날짜',
+                                        'engineer': '엔지니어',
+                                        'action': '작업 내용',
+                                        'notes': '비고',
+                                        'cost': '실제 비용',
+                                        'currency': '화폐',
+                                        'cost_diff': '비용 차이 (실제 - 예상)'
+                                    }), width='stretch')
+                                else:
+                                    st.info("이 항목에 대한 정비 이력이 없습니다.")
+
+                        # 예방 정비 항목 추가
+                        with st.form("admin_add_preventive_form", clear_on_submit=True):
+                            st.subheader("새 예방 정비 항목 추가")
+                            maintenance_item = st.text_input("정비 항목", placeholder="예: 오일 교체")
+                            selected_eq_name_add = st.selectbox("설비 선택", options=list(eq_options.keys())[:-1], key='admin_add_eq_select')  # '모든 설비' 제외
+                            selected_eq_id_add = eq_options.get(selected_eq_name_add)
+                            cycle_days = st.number_input("주기(일)", min_value=1, value=30, step=1)
+                            description = st.text_area("설명", placeholder="정비 항목에 대한 설명...")
+                            last_maintenance_date = st.date_input("최근 정비일", value=None, key="admin_last_maintenance_date")
+                            notification_threshold = st.number_input("알림 기준 (일)", min_value=0, value=7, step=1)
+                            estimated_cost = st.number_input("예상 비용", min_value=0.0, value=0.0, step=0.01)
+                            estimated_currency = st.selectbox("예상 비용 화폐 단위", ['KRW', 'USD', 'VND', 'THB', 'MXN'], index=0)
+                            submitted = st.form_submit_button("정비 항목 추가")
+                            if submitted:
+                                if maintenance_item and cycle_days and selected_eq_id_add:
+                                    add_preventive_maintenance(
+                                        selected_eq_id_add,
+                                        maintenance_item,
+                                        cycle_days,
+                                        description,
+                                        last_maintenance_date,
+                                        notification_threshold,
+                                        estimated_cost,
+                                        estimated_currency
+                                    )
+                                    st.success("정비 항목이 추가되었습니다.")
+                                    st.rerun()
+                                else:
+                                    st.error("정비 항목, 주기, 설비를 입력해주세요.")
