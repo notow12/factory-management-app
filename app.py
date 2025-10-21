@@ -73,9 +73,16 @@ def get_factories():
     res = supabase.from_('factories').select('*').execute()
     return res.data if res.data else []
 
+def natural_sort_key(text):
+    """
+    자연스러운 숫자 정렬을 위한 키 함수
+    예: 1호기, 2호기, 10호기, 11호기 순으로 정렬
+    """
+    return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', str(text))]
+
 @st.cache_data(ttl=60)  # TTL을 60초로 줄임
 def get_equipment(factory_id=None):
-    query = supabase.from_('equipment').select('*, factories(name)').order('name')
+    query = supabase.from_('equipment').select('*, factories(name)')  # .order('name') 제거
     if factory_id:
         query = query.eq('factory_id', factory_id)
     res = query.execute()
@@ -86,6 +93,8 @@ def get_equipment(factory_id=None):
                     eq['details'] = json.loads(eq['details'])
                 except json.JSONDecodeError:
                     eq['details'] = {}
+        # 🎯 Python에서 자연스러운 정렬 적용
+        res.data = sorted(res.data, key=lambda x: natural_sort_key(x.get('name', '')))
     return res.data if res.data else []
 
 @st.cache_data(ttl=600)
