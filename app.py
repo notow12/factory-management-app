@@ -2224,21 +2224,21 @@ else:
                 with col5:
                     serial_number = st.text_input(get_translation('serial_number'), key="add_eq_serial_number")
                 with col6:
-                    production_date = st.date_input(get_translation('production_date'), key="add_eq_production_date", min_value=date(1950, 1, 1))
+                    production_date = st.date_input(get_translation('production_date'), key="add_eq_production_date", min_value=date(1950, 1, 1), max_value=date.today())
 
                 # 세 번째 행: 취득가액, 취득일, 취득근거
                 col7, col8, col9 = st.columns(3)
                 with col7:
                     acquisition_cost = st.text_input(get_translation('acquisition_cost'), key="add_eq_acquisition_cost")
                 with col8:
-                    acquisition_date = st.date_input(get_translation('acquisition_date'), key="add_eq_acquisition_date", min_value=date(1950, 1, 1))
+                    acquisition_date = st.date_input(get_translation('acquisition_date'), key="add_eq_acquisition_date", min_value=date(1950, 1, 1), max_value=date.today())
                 with col9:
                     acquisition_basis = st.text_input(get_translation('acquisition_basis'), key="add_eq_acquisition_basis")
 
                 # 네 번째 행: 구입일, 설치장소, 설비 등급
                 col10, col11, col12 = st.columns(3)
                 with col10:
-                    purchase_date = st.date_input(get_translation('purchase_date'), key="add_eq_purchase_date", min_value=date(1950, 1, 1))
+                    purchase_date = st.date_input(get_translation('purchase_date'), key="add_eq_purchase_date", min_value=date(1950, 1, 1), max_value=date.today())
                 with col11:
                     installation_location = st.text_input(get_translation('installation_location'), key="add_eq_installation_location")
                 with col12:
@@ -2370,6 +2370,7 @@ else:
                                 get_translation('col_replacement_date'): st.column_config.DateColumn(
                                     get_translation('col_replacement_date'),
                                     min_value=date(1950, 1, 1),
+                                    max_value=date.today(),
                                     format="YYYY-MM-DD"
                                 )
                             },
@@ -2638,7 +2639,8 @@ else:
                         maintenance_date = st.date_input(
                             get_translation('maintenance_date'),
                             value=date.today(),
-                            min_value=date(1900, 1, 1)
+                            min_value=date(1900, 1, 1),
+                            max_value=date.today()
                         )
                     with col_dt2:
                         maintenance_time = st.time_input(
@@ -3288,6 +3290,7 @@ else:
                                         get_translation('col_replacement_date'): st.column_config.DateColumn(
                                             get_translation('col_replacement_date'),
                                             min_value=date(1950, 1, 1),
+                                            max_value=date.today(),
                                             format="YYYY-MM-DD"
                                         )
                                     },
