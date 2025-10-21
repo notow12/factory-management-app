@@ -2130,7 +2130,7 @@ else:
                     else:
                         st.info(get_translation('no_status_history'))
 
-# ------------------------ 설비 추가 ------------------------
+    # ------------------------ 설비 추가 ------------------------
     with tabs[1]:
         st.header(get_translation('add_equipment'))
 
@@ -2269,7 +2269,7 @@ else:
                 if specific_fields:
                     st.markdown(f"##### {selected_template_name} 전용 사양")
                     specific_fields_data = {}
-                    field_defs = load_field_definitions()  # 수정: 동적 로드
+                    field_defs = load_field_definitions()  # 동적 로드
                     specific_details = []
                     for field_key in specific_fields:
                         field_def = field_defs.get(field_key, {'label': field_key, 'type': 'text'})
@@ -2331,33 +2331,6 @@ else:
                             accept_multiple_files=True,
                             key="add_eq_accessory_documents"
                         )
-                        if uploaded_documents:
-                            for uploaded_file in uploaded_documents:
-                                file_data = {
-                                    'filename': uploaded_file.name,
-                                    'file_type': uploaded_file.type,
-                                    'content': uploaded_file.getvalue()
-                                }
-                                if file_data not in st.session_state.documents:
-                                    st.session_state.documents.append(file_data)
-
-                        # 업로드된 문서 테이블 표시 (폼 밖으로 이동)
-                        st.markdown("---")
-                        st.subheader("업로드된 문서")
-                        documents_df = pd.DataFrame(
-                            st.session_state.documents if st.session_state.documents else [],
-                            columns=['파일명', '파일 유형']
-                        )
-                        for idx, doc in documents_df.iterrows():
-                            st.download_button(
-                                label=f"다운로드 {doc['파일명']}",
-                                data=doc['content'],
-                                file_name=doc['파일명'],
-                                mime=doc['file_type'],
-                                key=f"download_doc_{idx}"
-                            )
-                        if st.session_state.documents:
-                            st.write(f"**현재 {len(st.session_state.documents)}개의 문서가 등록되어 있습니다.**")
                     st.markdown("---")
 
                 # SPARE PART 사양
@@ -2482,9 +2455,9 @@ else:
                 if fields_config.get('has_oil_specs', True):
                     with st.expander(get_translation('oil_specs'), expanded=False):
                         st.markdown(f"**{get_translation('add_row_instruction')}**")
-    
+
                         cols_tables_and_note = st.columns([7, 3])
-    
+
                         with cols_tables_and_note[0]:
                             oil_df = pd.DataFrame(
                                 st.session_state.oil_specs if st.session_state.oil_specs else [],
@@ -2506,7 +2479,7 @@ else:
                                 get_translation('col_maintenance_cycle'): '교체 주기'
                             }).to_dict('records')
                             st.write(f"**현재 {len(st.session_state.oil_specs)}개의 작동유 항목이 등록되어 있습니다.**")
-    
+
                         with cols_tables_and_note[1]:
                             st.markdown("###### 작동유 점도 측정 방법")
                             note_text = """
@@ -2551,7 +2524,7 @@ else:
                     st.markdown("**1년 경과 후 사후관리 방안:**")
                     st.markdown("*아래에 내용을 작성하세요. 줄바꿈이 자동으로 적용됩니다.*")
                     st.session_state.oil_aftercare = st.text_area("사후관리 내용", value=st.session_state.get('oil_aftercare', ''), key="add_oil_aftercare", height=100, label_visibility="collapsed")
-    
+
                 if st.form_submit_button(get_translation('add_equipment_button'), type="primary"):
                     if not selected_template_name:
                         st.info("👆 먼저 설비 종류를 선택해주세요.")
@@ -2588,6 +2561,25 @@ else:
                                 'wear_resistant_cycle': st.session_state.screw_specs.get('wear_resistant_cycle', [])
                             }
 
+                        # 문서 업로드 처리 (submit 시 Supabase 업로드)
+                        if uploaded_documents:
+                            st.session_state.documents = []  # 초기화
+                            for uploaded_file in uploaded_documents:
+                                doc_url = upload_document_to_supabase(uploaded_file)
+                                if doc_url:
+                                    file_data = {
+                                        '기술 자료명': uploaded_file.name,
+                                        '취급 설명서': '',
+                                        '전기 도면': '',
+                                        '유.증압도면': '',
+                                        '윤활 기준표': '',
+                                        'url': doc_url,
+                                        'file_type': uploaded_file.type
+                                    }
+                                    # 중복 체크 (기술 자료명 기준)
+                                    if not any(d['기술 자료명'] == file_data['기술 자료명'] for d in st.session_state.documents):
+                                        st.session_state.documents.append(file_data)
+
                         success, message = add_equipment(
                             factory_id=st.session_state.current_factory['id'],
                             name=name,
@@ -2600,16 +2592,16 @@ else:
                             documents=st.session_state.documents,
                             screw_specs=screw_specs_to_add,
                             oil_specs=st.session_state.oil_specs,
-                            status=get_translation('normal'),  # 수정: 'active' -> get_translation('normal')
+                            status=get_translation('normal'),
                             uploaded_images=uploaded_images,
-                            uploaded_documents=uploaded_documents,
+                            uploaded_documents=None,  # 이미 처리했으므로 None
                             oil_notes=st.session_state.other_notes,
                             oil_aftercare=st.session_state.oil_aftercare,
-                            selected_template=selected_template  # 템플릿 전달
+                            selected_template=selected_template
                         )
                         if success:
                             reset_add_equipment_form_state()
-                            st.cache_data.clear()  # 수정: 캐시 갱신
+                            st.cache_data.clear()
                             st.success("설비가 성공적으로 추가되었습니다. 입력 값이 유지됩니다. 초기화 버튼으로 리셋하세요.")
                             st.rerun()
                         else:
